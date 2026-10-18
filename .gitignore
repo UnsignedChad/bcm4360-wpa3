@@ -1,0 +1,15 @@
+# Build output
+*.o
+*.ko
+*.mod
+*.mod.c
+.*.cmd
+.*.d
+Module.symvers
+modules.order
+.tmp_versions/
+build.log
+
+# Broadcom's proprietary blob (and the patched/derived copies) must NEVER be committed.
+# Get it from broadcom-sta 6.30.223.271 (see README).
+wl-src/lib/

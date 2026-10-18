@@ -15,6 +15,7 @@ REDIRECTS = {  # real symbol -> wrapper symbol (defined in the glue)
     "wlc_sendauth": "__wrap_wlc_sendauth",
     "wlc_authresp_client": "__wrap_wlc_authresp_client",
     "wlc_recv": "__wrap_wlc_recv",
+    "wlc_sendmgmt": "__wrap_wlc_sendmgmt",   # Block Ack frames must be CCMP-protected under PMF
 }
 
 def main():

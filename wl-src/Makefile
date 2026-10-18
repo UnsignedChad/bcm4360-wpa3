@@ -123,17 +123,22 @@ GCCVERSION := $(subst $(space),$(empty),$(GCCVERSION))
 GCCVERSION := $(shell expr `echo $(GCCVERSION)` | cut -b1-3)
 GE_49 := $(shell expr `echo $(GCCVERSION)` \>= 490)
 
-EXTRA_CFLAGS :=
+ccflags-y :=
 
 ifeq ($(APIFINAL),CFG80211)
-  EXTRA_CFLAGS += -DUSE_CFG80211
+  ccflags-y += -DUSE_CFG80211
   $(info Using CFG80211 API)
 endif
 
 ifeq ($(APIFINAL),WEXT)
-  EXTRA_CFLAGS += -DUSE_IW
+  ccflags-y += -DUSE_IW
   $(info Using Wireless Extension API)
 endif
+
+# Broadcom's code uses legacy trailing one-element arrays (maclist.ea[1], pmkid lists, ...)
+# indexed past [0]; CONFIG_UBSAN_BOUNDS kernels (Ubuntu) log a splat + taint (W) on every
+# connect/multicast change. Harmless here, so keep the sanitizer off for this module.
+UBSAN_SANITIZE     := n
 
 obj-m              += wl.o
 
@@ -143,12 +148,12 @@ wl-objs            += src/wl/sys/wl_linux.o
 wl-objs            += src/wl/sys/wl_iw.o
 wl-objs            += src/wl/sys/wl_cfg80211_hybrid.o
 
-EXTRA_CFLAGS       += -I$(src)/src/include -I$(src)/src/common/include
-EXTRA_CFLAGS       += -I$(src)/src/wl/sys -I$(src)/src/wl/phy -I$(src)/src/wl/ppr/include
-EXTRA_CFLAGS       += -I$(src)/src/shared/bcmwifi/include
-#EXTRA_CFLAGS       += -DBCMDBG_ASSERT -DBCMDBG_ERR
+ccflags-y       += -I$(src)/src/include -I$(src)/src/common/include
+ccflags-y       += -I$(src)/src/wl/sys -I$(src)/src/wl/phy -I$(src)/src/wl/ppr/include
+ccflags-y       += -I$(src)/src/shared/bcmwifi/include
+#ccflags-y       += -DBCMDBG_ASSERT -DBCMDBG_ERR
 ifeq "$(GE_49)" "1"
-EXTRA_CFLAGS       += -Wno-date-time
+ccflags-y       += -Wno-date-time
 endif
 
 # Look for kernel architecture.
@@ -168,7 +173,7 @@ ifeq ($(CONFIG_NET),y)
     endif
 endif
 
-EXTRA_LDFLAGS      := $(src)/lib/$(SHIPPED)
+ldflags-y      := $(src)/lib/$(SHIPPED)
 
 KVER               ?= $(shell uname -r)
 KBASE              ?= /lib/modules/$(KVER)
@@ -178,6 +183,12 @@ MDEST_DIR          ?= $(KBASE)/kernel/drivers/net/wireless
 # Cross compile setup.  Tool chain and kernel tree, replace with your own.
 CROSS_TOOLS        = /path/to/tools
 CROSS_KBUILD_DIR   = /path/to/kernel/tree
+
+# Since Linux 6.15 objtool fails hard on the proprietary blob embedded in wl.o (it does not
+# follow current kernel requirements, e.g. unannotated intra-function calls). Skip objtool for
+# the final wl.o link only (same workaround as Ubuntu's broadcom-sta package). Note this also
+# silences objtool's "can't find starting instruction" check on synthetic symbols.
+wl.o: override objtool-enabled =
 
 all:
 	KBUILD_NOPEDANTIC=1 make -C $(KBUILD_DIR) M=`pwd`

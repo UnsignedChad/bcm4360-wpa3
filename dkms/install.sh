@@ -2,8 +2,11 @@
 # Install the patched wl driver via DKMS so it auto-rebuilds on kernel updates,
 # and load it at boot before NetworkManager. Run from the repo root: dkms/install.sh
 set -e
-VER=1.0; NAME=wl-wpa3; SRC=/usr/src/$NAME-$VER
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# name/version come from dkms.conf so there is a single source of truth
+NAME=$(sed -n 's/^PACKAGE_NAME="\(.*\)"/\1/p' "$REPO/dkms/dkms.conf")
+VER=$(sed -n 's/^PACKAGE_VERSION="\(.*\)"/\1/p' "$REPO/dkms/dkms.conf")
+SRC=/usr/src/$NAME-$VER
 ORIG="$REPO/wl-src/lib/wlc_hybrid.o_amd64.orig"
 
 [ -f "$ORIG" ] || { echo "Put the pristine blob at wl-src/lib/wlc_hybrid.o_amd64.orig first (see README)"; exit 1; }
@@ -12,6 +15,9 @@ ORIG="$REPO/wl-src/lib/wlc_hybrid.o_amd64.orig"
 echo "== assemble self-contained DKMS source at $SRC =="
 rm -rf "$SRC"; mkdir -p "$SRC/lib" "$SRC/patches"
 cp -a "$REPO/wl-src/Makefile" "$REPO/wl-src/src" "$SRC/"
+# never ship stale objects from a previous ./build.sh into the DKMS tree (other kernel/flags)
+find "$SRC" \( -name '*.o' -o -name '.*.cmd' -o -name '*.ko' -o -name '*.mod' -o -name '*.mod.c' \
+     -o -name Module.symvers -o -name modules.order \) -delete
 cp "$ORIG" "$SRC/lib/wlc_hybrid.o_amd64.orig"
 cp "$REPO/patches/wl_patch.py" "$REPO/patches/wl_reloc.py" "$SRC/patches/"
 cp "$REPO/dkms/dkms.conf" "$REPO/dkms/dkms-prebuild.sh" "$SRC/"
@@ -50,7 +56,7 @@ After=systemd-modules-load.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/sbin/modprobe wl
-ExecStartPost=/bin/sh -c 'for i in $(seq 1 25); do [ -e /sys/class/net/wlan0 ] && exit 0; sleep 0.2; done'
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 25); do ls /sys/class/net/*/phy80211 >/dev/null 2>&1 && exit 0; sleep 0.2; done'
 ExecStop=/sbin/rmmod wl
 
 [Install]

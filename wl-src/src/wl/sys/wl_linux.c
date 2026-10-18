@@ -147,12 +147,32 @@ extern int wlc_queue_80211_frag(void *wlc, void *pkt, void *txq, void *scb,
 extern void *wlc_bsscfg_find_by_bssid(void *wlc, const void *bssid);
 extern void *wlc_scbfind(void *wlc, void *bsscfg, const unsigned char *mac);
 
-/* Verbose RE/WPA3 debug logging toggle (default on). Mute at runtime with:
- *   echo 0 | sudo tee /sys/module/wl/parameters/re_verbose      */
-int re_verbose = 1;
+/* Verbose WPA3/PMF debug logging toggle (default off). Enable at runtime with:
+ *   echo 1 | sudo tee /sys/module/wl/parameters/re_verbose      */
+int re_verbose = 0;
 module_param(re_verbose, int, 0644);
-MODULE_PARM_DESC(re_verbose, "verbose WPA3/PMF debug printk (1=on, 0=off)");
+MODULE_PARM_DESC(re_verbose, "verbose WPA3/PMF debug printk (1=on, 0=off, default off)");
 #define re_log(...) do { if (re_verbose) printk(KERN_ERR __VA_ARGS__); } while (0)
+
+/* Verbose-only EAPOL-Key trace. `eth` points at the Ethernet header. Layout after it: EAPOL
+ * ver, type(3=Key), len(2), descriptor type, Key Information(2), key length(2), replay counter(8). */
+static void re_trace_eapol(wl_info_t *wl, const char *dir, const unsigned char *eth, unsigned int len)
+{
+	wl_cnt_t *c;
+
+	if (!re_verbose || len < 14 + 17 || eth[12] != 0x88 || eth[13] != 0x8e || eth[15] != 3)
+		return;
+	printk(KERN_ERR "re: %s EAPOL-Key keyinfo=0x%04x replay=%02x%02x%02x%02x%02x%02x%02x%02x len=%u\n",
+	       dir, (eth[19] << 8) | eth[20], eth[23], eth[24], eth[25], eth[26], eth[27], eth[28],
+	       eth[29], eth[30], len);
+	/* the blob's own counters: did the AP ACK our frame, can we decrypt what we receive? */
+	if (wl && wl->pub && (c = wl->pub->_cnt))
+		printk(KERN_ERR "re: cnt txfail=%u txretry=%u txnoack=%u txnocts=%u rxundec=%u/%u "
+		       "ccmpundec=%u/%u ccmpreplay=%u/%u ccmpfmterr=%u/%u rxcrc=%u\n",
+		       c->txfail, c->txretry, c->txnoack, c->txnocts, c->rxundec, c->rxundec_mcst,
+		       c->ccmpundec, c->ccmpundec_mcst, c->ccmpreplay, c->ccmpreplay_mcst,
+		       c->ccmpfmterr, c->ccmpfmterr_mcst, c->rxcrc);
+}
 
 void *wl_re_dev_wlc(struct net_device *dev, void **osh_out)
 {
@@ -224,6 +244,22 @@ int wl_re_mgmt_tx(struct net_device *dev, const unsigned char *f, int flen, void
 extern void re_auth_advance(void *bsscfg, int code, const unsigned char *mac, int p4, int p5);
 extern void *wlc_scbfind(void *wlc, void *bsscfg, const unsigned char *mac);
 
+/* The blob owns the host-IE buffer at assoc+0x30: it MFREE()s it (kfree) when the bsscfg is torn
+ * down, and uses it for every later assoc-req. We point it at static memory (wl_sae.assoc_ie), so
+ * it must be taken back before that: otherwise rmmod kfree()s module data ("Not a kmalloc
+ * allocation" + "Memory leak of bytes -50"), and a following non-SAE (WPA2) connect would still
+ * send the stale SAE RSN IE. Called on every connect, on disconnect and before wlc_detach(). */
+static void *re_assoc_ctx;
+void wl_re_release_assoc_ie(void)
+{
+	void *assoc = re_assoc_ctx;
+	if (!assoc)
+		return;
+	*(const unsigned char **)((char *)assoc + 0x30) = NULL;
+	*(unsigned int *)((char *)assoc + 0x38) = 0;
+	re_assoc_ctx = NULL;
+}
+
 void wl_re_drive_assoc(struct net_device *dev, void *bsscfg, const unsigned char *mac,
                        const unsigned char *assoc_ie, unsigned int assoc_ie_len)
 {
@@ -252,6 +288,7 @@ void wl_re_drive_assoc(struct net_device *dev, void *bsscfg, const unsigned char
 	 * its PSK/no-MFP template). This was NULL by default -> point it at wpa_s's IEs so the
 	 * assoc-req carries SAE AKM + MFPC + BIP, matching the AP and the userspace 4-way. */
 	if (assoc && assoc_ie && assoc_ie_len) {
+		re_assoc_ctx = assoc;
 		*(const unsigned char **)((char *)assoc + 0x30) = assoc_ie;
 		*(unsigned int *)((char *)assoc + 0x38) = assoc_ie_len;
 		re_log("re drive_assoc: injected host assoc IEs (%u bytes) at assoc+0x30\n",
@@ -296,6 +333,7 @@ static void wl_report_radio_state(wl_info_t *wl);
 /* EXPERIMENTAL FORK ONLY: GPL so we can use the kernel crypto AEAD (ccm(aes)) for the SW
  * 802.11w SA-Query layer. The stable repo keeps "MIXED/Proprietary". Never distributed. */
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Broadcom 802.11 hybrid wl driver with WPA3-SAE and 802.11w (PMF) support");
 
 static struct pci_device_id wl_id_table[] =
 {
@@ -1164,6 +1202,7 @@ wl_free(wl_info_t *wl)
 		wlc_module_unregister(wl->pub, "linux", wl);
 	}
 
+	wl_re_release_assoc_ie();   /* before the blob frees the bsscfg (see above) */
 	if (wl->wlc) {
 		{
 		char tmp1[128];
@@ -1463,8 +1502,12 @@ wl_alloc_linux_if(wl_if_t *wlif)
 	bzero(dev, sizeof(struct net_device));
 	ether_setup(dev);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 2, 0)
+	strscpy(dev->name, intf_name, IFNAMSIZ);
+#else
 	strncpy(dev->name, intf_name, IFNAMSIZ-1);
 	dev->name[IFNAMSIZ-1] = '\0';
+#endif
 
 	priv_link = MALLOC(wl->osh, sizeof(priv_link_t));
 	if (!priv_link) {
@@ -1637,7 +1680,9 @@ wl_down(wl_info_t *wl)
 		int i = 0;
 		for (i = 0; (atomic_read(&wl->callbacks) > callbacks) && i < 10000; i++) {
 			schedule();
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0)
 			flush_scheduled_work();
+#endif
 		}
 	}
 	else
@@ -1681,8 +1726,12 @@ wl_get_driver_info(struct net_device *dev, struct ethtool_drvinfo *info)
 #endif
 	bzero(info, sizeof(struct ethtool_drvinfo));
 	snprintf(info->driver, sizeof(info->driver), "wl%d", wl->pub->unit);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 2, 0)
+	strscpy(info->version, EPI_VERSION_STR, sizeof(info->version));
+#else
 	strncpy(info->version, EPI_VERSION_STR, sizeof(info->version));
 	info->version[(sizeof(info->version))-1] = '\0';
+#endif
 }
 
 static int
@@ -2221,6 +2270,7 @@ wl_sendup(wl_info_t *wl, wl_if_t *wlif, void *p, int numpkt)
 
 	}
 
+	re_trace_eapol(wl, "rx", skb->data, skb->len);
 	skb->protocol = eth_type_trans(skb, skb->dev);
 
 	if (!brcm_specialpkt && !ISALIGNED(skb->data, 4)) {
@@ -2363,6 +2413,7 @@ wl_start(struct sk_buff *skb, struct net_device *dev)
 	wlif = WL_DEV_IF(dev);
 	wl = WL_INFO(dev);
 
+	re_trace_eapol(wl, "tx", skb->data, skb->len);
 	skb->prev = NULL;
 	if (WL_ALL_PASSIVE_ENAB(wl) || (WL_RTR() && WL_CONFIG_SMP())) {
 
@@ -2505,7 +2556,9 @@ wl_timer(
 #endif
 ) {
 	wl_timer_t *t =
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
+		timer_container_of(t, tl, timer);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
 		from_timer(t, tl, timer);
 #else
 		(wl_timer_t *)data;
@@ -2611,7 +2664,11 @@ wl_del_timer(wl_info_t *wl, wl_timer_t *t)
 	ASSERT(t);
 	if (t->set) {
 		t->set = FALSE;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 0)
+		if (!timer_delete(&t->timer)) {
+#else
 		if (!del_timer(&t->timer)) {
+#endif
 #ifdef BCMDBG
 			WL_INFORM(("wl%d: Failed to delete timer %s\n", wl->unit, t->name));
 #endif
@@ -3170,7 +3227,11 @@ _wl_add_monitor_if(wl_task_t *task)
 	}
 
 	ASSERT(strlen(wlif->name) > 0);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 2, 0)
+	memcpy(wlif->dev->name, wlif->name, strlen(wlif->name));
+#else
 	strncpy(wlif->dev->name, wlif->name, strlen(wlif->name));
+#endif
 
 	wl->monitor_dev = dev;
 	if (wl->monitor_type == 1)
@@ -3383,6 +3444,9 @@ wl_report_radio_state(wl_info_t *wl)
 
 #endif 
 
+static unsigned int re_tick;   /* watchdog ticks (1/s) for the re_verbose>=2 stats line */
+extern void wl_re_link_tick(struct net_device *dev, unsigned long tx, unsigned long retry);
+
 static int
 wl_linux_watchdog(void *ctx)
 {
@@ -3424,6 +3488,26 @@ wl_linux_watchdog(void *ctx)
 					stats->rx_fifo_errors = WLCNTVAL(wl->pub->_cnt->rxoflo);
 					stats->rx_missed_errors = 0;
 					stats->tx_fifo_errors = 0;
+
+					/* re_verbose >= 2: counter time series (every 5 s) to see when TX/RX
+					 * health changes, e.g. around a group-key rekey */
+					if (re_verbose >= 2 && wl->pub->_cnt && (++re_tick % 5) == 0) {
+						wl_cnt_t *c = wl->pub->_cnt;
+						int pm = -1, rate = -1, noise = 0;
+						struct { int hw, target, scan; } ch = { -1, -1, -1 };
+						wlc_get(wl->wlc, WLC_GET_PM, &pm);
+						wlc_get(wl->wlc, WLC_GET_RATE, &rate);
+						wlc_get(wl->wlc, WLC_GET_PHY_NOISE, &noise);
+						wlc_ioctl(wl->wlc, WLC_GET_CHANNEL, &ch, sizeof(ch), NULL);
+						printk(KERN_ERR "re: stat pm=%d tx=%lu rx=%lu txfail=%u retry=%u noack=%u "
+						       "rxundec=%u/%u ccmpundec=%u/%u replay=%u/%u rxcrc=%u rate=%d noise=%d "
+						       "chan=%d/%d/%d\n", pm,
+						       stats->tx_packets, stats->rx_packets, c->txfail, c->txretry,
+						       c->txnoack, c->rxundec, c->rxundec_mcst, c->ccmpundec,
+						       c->ccmpundec_mcst, c->ccmpreplay, c->ccmpreplay_mcst, c->rxcrc,
+						       rate, noise, ch.hw, ch.target, ch.scan);
+					}
+					wl_re_link_tick(wlif->dev, stats->tx_packets, WLCNTVAL(wl->pub->_cnt->txretry));
 				}
 
 #ifdef USE_IW

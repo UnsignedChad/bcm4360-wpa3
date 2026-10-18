@@ -471,8 +471,12 @@ osl_debug_malloc(osl_t *osh, uint size, int line, const char* file)
 	if (!basename)
 		basename = file;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 2, 0)
+	strscpy(p->file, basename, BCM_MEM_FILENAME_LEN);
+#else
 	strncpy(p->file, basename, BCM_MEM_FILENAME_LEN);
 	p->file[BCM_MEM_FILENAME_LEN - 1] = '\0';
+#endif
 
 	if (osh) {
 		p->prev = NULL;
@@ -860,7 +864,12 @@ osl_strcpy(char *d, const char *s)
 char*
 osl_strncpy(char *d, const char *s, uint n)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 2, 0)
+	strscpy_pad(d, s, n);
+	return (d);
+#else
 	return (strncpy(d, s, n));
+#endif
 }
 
 char*

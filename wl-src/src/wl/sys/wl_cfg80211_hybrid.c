@@ -67,7 +67,16 @@ wl_cfg80211_scan(struct wiphy *wiphy,
 static s32 wl_cfg80211_scan(struct wiphy *wiphy, struct net_device *ndev,
            struct cfg80211_scan_request *request);
 #endif
+/* cfg80211 op signature changes tracked by the LINUX_VERSION_CODE guards below
+ * (verified by building against 6.12, 6.14, 6.17, 7.0, 7.1, 7.2 and 7.3 headers):
+ *   6.17  set_wiphy_params/set_tx_power/get_tx_power gained `int radio_idx`
+ *   7.1   add_key/del_key/get_key/get_station take a wireless_dev instead of a net_device
+ *   7.3   mgmt_tx receives the cookie by value (cfg80211 now assigns it) */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+static s32 wl_cfg80211_set_wiphy_params(struct wiphy *wiphy, int radio_idx, u32 changed);
+#else
 static s32 wl_cfg80211_set_wiphy_params(struct wiphy *wiphy, u32 changed);
+#endif
 static s32 wl_cfg80211_join_ibss(struct wiphy *wiphy, struct net_device *dev,
            struct cfg80211_ibss_params *params);
 static s32 wl_cfg80211_leave_ibss(struct wiphy *wiphy, struct net_device *dev);
@@ -75,6 +84,9 @@ static s32 wl_cfg80211_leave_ibss(struct wiphy *wiphy, struct net_device *dev);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 16, 0)
 static s32 wl_cfg80211_get_station(struct wiphy *wiphy,
            struct net_device *dev, u8 *mac, struct station_info *sinfo);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+static s32 wl_cfg80211_get_station(struct wiphy *wiphy,
+           struct wireless_dev *wdev, const u8 *mac, struct station_info *sinfo);
 #else
 static s32 wl_cfg80211_get_station(struct wiphy *wiphy,
            struct net_device *dev, const u8 *mac, struct station_info *sinfo);
@@ -86,7 +98,11 @@ static int wl_cfg80211_connect(struct wiphy *wiphy, struct net_device *dev,
            struct cfg80211_connect_params *sme);
 static s32 wl_cfg80211_disconnect(struct wiphy *wiphy, struct net_device *dev, u16 reason_code);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+static s32
+wl_cfg80211_set_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev, int radio_idx,
+                         enum nl80211_tx_power_setting type, s32 mbm);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0)
 static s32
 wl_cfg80211_set_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev,
                          enum nl80211_tx_power_setting type, s32 mbm);
@@ -98,7 +114,9 @@ static s32 wl_cfg80211_set_tx_power(struct wiphy *wiphy,
            enum tx_power_setting type, s32 mbm);
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+static s32 wl_cfg80211_get_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev, int radio_idx, unsigned int link_id, s32 *dbm);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
 static s32 wl_cfg80211_get_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev, u32 /*link_id*/, s32 *dbm);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0)
 static s32 wl_cfg80211_get_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev, s32 *dbm);
@@ -117,7 +135,17 @@ static s32 wl_cfg80211_config_default_key(struct wiphy *wiphy,
 static s32 wl_cfg80211_config_default_key(struct wiphy *wiphy,
            struct net_device *dev, u8 key_idx);
 #endif
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+static s32 wl_cfg80211_add_key(struct wiphy *wiphy, struct wireless_dev *wdev,
+           int link_id, u8 key_idx, bool pairwise, const u8 *mac_addr,
+           struct key_params *params);
+static s32 wl_cfg80211_del_key(struct wiphy *wiphy, struct wireless_dev *wdev,
+           int link_id, u8 key_idx, bool pairwise, const u8 *mac_addr);
+static s32 wl_cfg80211_get_key(struct wiphy *wiphy, struct wireless_dev *wdev,
+           int link_id, u8 key_idx, bool pairwise, const u8 *mac_addr,
+           void *cookie,
+           void (*callback) (void *cookie, struct key_params *params));
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 static s32 wl_cfg80211_add_key(struct wiphy *wiphy, struct net_device *dev,
            int link_id, u8 key_idx, bool pairwise, const u8 *mac_addr,
            struct key_params *params);
@@ -226,6 +254,7 @@ static void wl_deinit_priv_mem(struct wl_cfg80211_priv *wl);
 static bool wl_is_ibssmode(struct wl_cfg80211_priv *wl);
 
 static void wl_link_up(struct wl_cfg80211_priv *wl);
+static struct cfg80211_bss *wl_get_ess_bss(struct wl_cfg80211_priv *wl);
 static void wl_link_down(struct wl_cfg80211_priv *wl);
 static s32 wl_set_mode(struct net_device *ndev, s32 iftype);
 
@@ -664,7 +693,11 @@ static s32 wl_set_retry(struct net_device *dev, u32 retry, bool l)
 	return err;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+static s32 wl_cfg80211_set_wiphy_params(struct wiphy *wiphy, int radio_idx, u32 changed)
+#else
 static s32 wl_cfg80211_set_wiphy_params(struct wiphy *wiphy, u32 changed)
+#endif
 {
 	struct wl_cfg80211_priv *wl = wiphy_to_wl(wiphy);
 	struct net_device *ndev = wl_to_ndev(wl);
@@ -767,7 +800,91 @@ static s32 wl_cfg80211_leave_ibss(struct wiphy *wiphy, struct net_device *dev)
 }
 
 extern int re_verbose;   /* verbose debug toggle (module param, defined in wl_linux.c) */
+extern void wl_re_release_assoc_ie(void);
 #define re_log(...) do { if (re_verbose) printk(KERN_ERR __VA_ARGS__); } while (0)
+
+/* Scan an IE blob for the RSN element and report whether it lists the SAE AKM (00-0F-AC:8).
+ * Returns 1 = RSN IE present and offers SAE, 0 = RSN IE present without SAE, -1 = no RSN IE. */
+static int wl_rsn_ie_has_sae(const u8 *ie, size_t len)
+{
+	while (ie && len >= 2) {
+		size_t elen = ie[1];
+		if (elen + 2 > len)
+			break;
+		if (ie[0] == WLAN_EID_RSN) {
+			const u8 *p = ie + 2;
+			size_t rem = elen;
+			u16 n, i;
+			/* version(2) group(4) pairwise-count(2) pairwise(4*n) akm-count(2) akm(4*m) */
+			if (rem < 8)
+				return 0;
+			n = p[6] | (p[7] << 8);
+			if (rem < 8 + (size_t)n * 4 + 2)
+				return 0;
+			p += 8 + n * 4;
+			rem -= 8 + n * 4;
+			n = p[0] | (p[1] << 8);
+			p += 2;
+			rem -= 2;
+			for (i = 0; i < n && rem >= 4; i++, p += 4, rem -= 4)
+				if (p[0] == 0x00 && p[1] == 0x0f && p[2] == 0xac && p[3] == 8)
+					return 1;
+			return 0;
+		}
+		ie += elen + 2;
+		len -= elen + 2;
+	}
+	return -1;
+}
+
+/* Does the RSN element in this IE blob demand protected management frames (RSN capabilities, MFPR)?
+ * wpa_supplicant sets MFPR only for "PMF required"; for "optional" it sets MFPC alone, but then
+ * still passes NL80211_MFP_REQUIRED to the kernel when the AP is PMF-capable, so cfg80211's mfp
+ * flag cannot tell the two apart. */
+static bool wl_rsn_ie_mfpr(const u8 *ie, size_t len)
+{
+	while (ie && len >= 2) {
+		size_t elen = ie[1];
+		if (elen + 2 > len)
+			break;
+		if (ie[0] == WLAN_EID_RSN) {
+			const u8 *p = ie + 2;
+			size_t rem = elen;
+			u16 n;
+			/* version(2) group(4) pairwise-count(2) pairwise(4*n) akm-count(2) akm(4*m) caps(2) */
+			if (rem < 8)
+				return false;
+			n = p[6] | (p[7] << 8);
+			if (rem < 8 + (size_t)n * 4 + 2)
+				return false;
+			p += 8 + n * 4;
+			rem -= 8 + n * 4;
+			n = p[0] | (p[1] << 8);
+			p += 2;
+			rem -= 2;
+			if (rem < (size_t)n * 4 + 2)
+				return false;
+			p += n * 4;
+			return (p[0] | (p[1] << 8)) & 0x0040;
+		}
+		ie += elen + 2;
+		len -= elen + 2;
+	}
+	return false;
+}
+
+/* Does this connect request ask for WPA3-SAE? Checked by auth_type, every offered AKM and the
+ * RSN IE wpa_supplicant built -- not just akm_suites[0]. */
+static bool wl_sme_is_sae(struct cfg80211_connect_params *sme)
+{
+	int i;
+	if (sme->auth_type == NL80211_AUTHTYPE_SAE)
+		return true;
+	for (i = 0; i < sme->crypto.n_akm_suites; i++)
+		if (sme->crypto.akm_suites[i] == WLAN_AKM_SUITE_SAE)
+			return true;
+	return wl_rsn_ie_has_sae(sme->ie, sme->ie_len) == 1;
+}
 
 static s32
 wl_set_wpa_version(struct net_device *dev, struct cfg80211_connect_params *sme)
@@ -778,7 +895,7 @@ wl_set_wpa_version(struct net_device *dev, struct cfg80211_connect_params *sme)
 
 	if (sme->crypto.wpa_versions & NL80211_WPA_VERSION_1)
 		val = WPA_AUTH_PSK | WPA_AUTH_UNSPECIFIED;
-	else if (sme->crypto.wpa_versions & NL80211_WPA_VERSION_2)
+	else if (sme->crypto.wpa_versions & (NL80211_WPA_VERSION_2 | BIT(2) /* NL80211_WPA_VERSION_3: SAE */))
 		val = WPA2_AUTH_PSK | WPA2_AUTH_UNSPECIFIED;
 	else
 		val = WPA_AUTH_DISABLED;
@@ -836,8 +953,7 @@ wl_set_auth_type(struct net_device *dev, struct cfg80211_connect_params *sme)
 	 * to userspace and sends the CONNECT with auth_type=OPEN, so keying on auth_type misses it.
 	 * Force the SAE auth alg (3) whenever the AKM is SAE so the firmware enters the SAE auth
 	 * state and __wrap_wlc_sendauth captures the scb/BSSID. */
-	if (sme->crypto.n_akm_suites &&
-	    sme->crypto.akm_suites[0] == WLAN_AKM_SUITE_SAE) {
+	if (wl_sme_is_sae(sme)) {
 		val = 3;
 		re_log("re: forcing auth alg=3 (SAE AKM, connect auth_type=%d)\n", sme->auth_type);
 	}
@@ -1051,17 +1167,187 @@ static struct {
 	u8  igtk_ipn[6];    /* IGTK packet number (replay) */
 	u8  tk[16];         /* pairwise CCMP temporal key (PTK TK) for SW mgmt-frame crypto */
 	bool tk_set;
-	u64 tx_pn;          /* our TX PN for SW-protected mgmt frames (SA-Query Response) */
+	atomic64_t tx_pn;   /* our TX PN for SW-protected mgmt frames (SA-Query Response, Block Ack) */
+	u64 rx_ba_pn;       /* last accepted PN of the AP's protected Block-Ack action frames */
+	struct delayed_work assoc_wd;  /* association watchdog: see wl_sae_assoc_wd_work() */
 	struct work_struct saq_work;   /* deferred SA-Query handler (RX path is atomic) */
 	u8  saq_frame[320];
 	unsigned int saq_len;
 	bool saq_busy;
+	/* AP teardown detection (802.11w SA Query + protected deauth/disassoc). */
+	struct work_struct dd_work;    /* process a captured deauth/disassoc, or a liveness probe */
+	struct delayed_work saq_chk;   /* SA-Query retry / timeout */
+	u8  dd_frame[96];
+	unsigned int dd_len;
+	bool dd_busy, dd_prot;
+	int  dd_kind;                  /* 0 = captured frame, 1 = liveness probe (after resume) */
+	bool saq_pending;
+	u16  saq_tid;
+	int  saq_tries;
+	u64  rx_mgmt_pn;               /* last accepted PN of the AP's protected deauth/disassoc */
+	bool stub_seen;     /* the blob has sent its own stub auth frame for this join */
+	atomic_t txfail_cnt;           /* WLC_E_TXFAIL events seen (a frame the AP never ACKed) */
+	u32  assoc_status;             /* 802.11 status code of the last association response (WLC_E_ASSOC) */
+	struct delayed_work retry_work; /* retry a join the AP answered with status 30 */
+	struct delayed_work join_work; /* issue a join deferred by the rejoin quiet time */
+	struct delayed_work hs_wd;     /* 4-way handshake watchdog */
+	u8   join_buf[128];            /* the WLC_SET_SSID request of the current connect, for retries */
+	size_t join_len;
+	int  retries;                  /* internal join retries used for this connect */
+	bool ptk_done;                 /* pairwise key installed = 4-way handshake completed */
+	unsigned long last_disc;       /* jiffies of the last disconnect */
+	bool sae_conn;      /* current connect request is WPA3-SAE (set in .connect) */
+	bool sae_ok;        /* host SAE finished OK (.external_auth status 0) for this connection */
+	u32  freq;          /* MHz of the connect channel (0 = unknown) */
 	int armed;          /* SAFETY GATE: hooks do SAE work ONLY while armed (set at connect,
 	                     * cleared after SAE/assoc + on disconnect). Keeps the RX tasklet hook
 	                     * inert outside the brief active-SAE window. */
 } wl_sae;
 
 static void wl_re_saq_work(struct work_struct *w);   /* SW SA-Query responder (defined below) */
+static int wl_re_send_protected_deauth(struct net_device *dev, u16 reason);   /* defined below */
+static void wl_re_dd_work(struct work_struct *w);
+static void wl_re_assoc_lost(struct net_device *dev, u16 reason, const char *why);
+static void wl_re_saq_chk_work(struct work_struct *w);
+void wl_re_link_tick(struct net_device *dev, unsigned long tx, unsigned long retry);
+static void wl_re_fast_key(const u8 *tk);
+static void wl_re_crypto_exit(void);
+
+/* After the host SAE succeeds we drive the blob into association (wl_re_drive_assoc). With this
+ * blob the association request sometimes never completes (seen with the original code too, ~50%
+ * of connects on a FRITZ!Box 6690), and wpa_supplicant then only notices after its own 10 s
+ * timeout. Fail the connect ourselves after a short grace period so it retries right away.
+ * A normal association completes within ~50 ms of re_auth_advance. */
+/* The blob sends a stub SAE auth frame of its own for every join (needed so it enters the
+ * authenticating state; the AP rejects it). The real exchange, driven by wpa_supplicant, MUST start
+ * after that stub: if our SAE commit goes out first, the late stub makes the AP discard its SAE
+ * state and the join collapses ~0.3 s later (SET_SSID FAIL). The stub's timing varies (100-340 ms
+ * after the join; later when the AP's scb already exists, i.e. when re-joining the same BSS), so a
+ * fixed delay cannot work: start when the stub has been sent, with a fallback if it never is. */
+#define WL_SAE_STUB_GRACE_MS		40
+#define WL_SAE_START_FALLBACK_MS	500
+#define WL_SAE_ASSOC_TIMEOUT_MS	3000
+
+/* Tunables (ms). A full reconnect should neither be needlessly fast nor ever slow: these keep every
+ * step bounded. */
+#define WL_DEAUTH_SETTLE_MS	40	/* after our protected deauth, to see whether it was ACKed */
+#define WL_MIN_REJOIN_GAP_MS	2000	/* quiet time after a disconnect before the next join */
+#define WL_SAE_RETRY_DELAY_MS	1000	/* before retrying a failed join */
+#define WL_SAE_MAX_RETRIES	3
+#define WL_HS_TIMEOUT_MS	3500	/* association accepted but no 4-way handshake after this long */
+
+/* A join the firmware reports as failed (WLC_E_SET_SSID / FAIL, as opposed to "no network found").
+ * Seen when re-joining the BSS we just left, with WPA2-PSK as well as with SAE: the AP either answers
+ * the association request with status 30 ("rejected temporarily, try again later") or does not answer
+ * the authentication at all for a moment.
+ * Reporting the failure sends wpa_supplicant on a ~3.5 s scan, a hop to the other band and, in 2 of 5
+ * cases, a 10 s wait for a 4-way handshake that never starts. Wait a moment and join the same BSS
+ * again, silently (bounded: WL_SAE_MAX_RETRIES times, then the failure is reported as before). */
+
+/* Send the saved WLC_SET_SSID request (wl_sae.join_buf). For SAE this also arms the host exchange,
+ * which is started once the blob's stub auth frame is out (or after a fallback delay). */
+static int wl_sae_issue_join(struct net_device *dev)
+{
+	struct wl_cfg80211_priv *wl = ndev_to_wl(dev);
+	int err;
+
+	if (wl_sae.sae_conn) {   /* SAE: a fresh host-driven exchange; other joins are fully blob-driven */
+		wl_sae.stub_seen = false;
+		wl_sae.armed = 1;
+		schedule_delayed_work(&wl_sae.work, msecs_to_jiffies(WL_SAE_START_FALLBACK_MS));
+	}
+	err = wl_dev_ioctl(dev, WLC_SET_SSID, wl_sae.join_buf, wl_sae.join_len);
+	if (err) {
+		if (wl_sae.sae_conn) {
+			wl_sae.armed = 0;
+			cancel_delayed_work(&wl_sae.work);
+		}
+		return err;
+	}
+	set_bit(WL_STATUS_CONNECTING, &wl->status);
+	re_log("re: CONNECTING set\n");
+	return 0;
+}
+
+/* .connect must not sleep (it runs under the wiphy mutex / RTNL, which would stall every other
+ * wireless operation), so a join that has to wait out the rejoin quiet time is issued from here. */
+static void wl_sae_join_work(struct work_struct *w)
+{
+	struct net_device *dev = wl_sae.dev;
+	int err;
+
+	if (!dev || !wl_sae.join_len)
+		return;
+	err = wl_sae_issue_join(dev);
+	if (err) {
+		WL_ERR(("deferred join failed (%d)\n", err));
+		cfg80211_connect_result(dev, wl_sae.bssid, NULL, 0, NULL, 0,
+		                        WLAN_STATUS_AUTH_TIMEOUT, GFP_KERNEL);
+	}
+}
+
+static void wl_sae_retry_work(struct work_struct *w)
+{
+	struct net_device *dev = wl_sae.dev;
+	struct wl_cfg80211_priv *wl;
+	int err;
+
+	if (!dev || !wl_sae.join_len)
+		return;
+	wl = ndev_to_wl(dev);
+	if (!test_bit(WL_STATUS_CONNECTING, &wl->status))
+		return;
+	wl_sae.retries++;
+	wl_sae.assoc_status = 0;
+	re_log("re: retrying the join (#%d) after the AP's 'try again later'\n", wl_sae.retries);
+	if (wl_sae.sae_conn) {
+		wl_sae.sae_ok = false;
+		wl_re_release_assoc_ie();
+	}
+	err = wl_sae_issue_join(dev);
+	if (err) {
+		re_log("re: join retry failed (%d) -> reporting the failure\n", err);
+		if (test_and_clear_bit(WL_STATUS_CONNECTING, &wl->status))
+			cfg80211_connect_result(dev, wl_sae.bssid, NULL, 0, NULL, 0,
+			                        WLAN_STATUS_AUTH_TIMEOUT, GFP_KERNEL);
+	}
+}
+
+/* The association was accepted but the AP never starts the 4-way handshake (seen right after a
+ * rejected join); wpa_supplicant would wait its full 10 s. Give it a bounded time, then drop the link
+ * so it retries at once. */
+static void wl_sae_hs_wd_work(struct work_struct *w)
+{
+	struct net_device *dev = wl_sae.dev;
+
+	if (!dev || wl_sae.ptk_done)
+		return;
+	wl_re_assoc_lost(dev, WLAN_REASON_4WAY_HANDSHAKE_TIMEOUT, "no 4-way handshake after association");
+}
+static void wl_sae_assoc_wd_work(struct work_struct *w)
+{
+	struct net_device *dev = wl_sae.dev;
+	struct wl_cfg80211_priv *wl;
+	scb_val_t scbval;
+
+	if (!dev)
+		return;
+	wl = ndev_to_wl(dev);
+	re_log("re: assoc watchdog fired: connecting=%d connected=%d\n",
+	       test_bit(WL_STATUS_CONNECTING, &wl->status), test_bit(WL_STATUS_CONNECTED, &wl->status));
+	/* wl_bss_connect_done() clears CONNECTING on link-up; whoever clears it first reports. */
+	if (!test_and_clear_bit(WL_STATUS_CONNECTING, &wl->status))
+		return;
+	re_log("re: association did not complete within %d ms -> failing connect\n",
+	       WL_SAE_ASSOC_TIMEOUT_MS);
+	memset(&scbval, 0, sizeof(scbval));
+	memcpy(&scbval.ea, wl_sae.bssid, ETHER_ADDR_LEN);
+	scbval.val = htod32(WLAN_REASON_UNSPECIFIED);
+	wl_dev_ioctl(dev, WLC_DISASSOC, &scbval, sizeof(scbval));
+	wl_sae.sae_ok = false;
+	cfg80211_connect_result(dev, wl_sae.bssid, NULL, 0, NULL, 0,
+	                        WLAN_STATUS_AUTH_TIMEOUT, GFP_KERNEL);
+}
 
 static void wl_sae_ext_auth_work(struct work_struct *w)
 {
@@ -1075,7 +1361,7 @@ static void wl_sae_ext_auth_work(struct work_struct *w)
 	memcpy(ext.bssid, wl_sae.bssid, ETH_ALEN);
 	ext.ssid = wl_sae.ssid;
 	rc = cfg80211_external_auth_request(wl_sae.dev, &ext, GFP_KERNEL);
-	WL_ERR(("re: deferred external SAE auth for %pM -> %d\n", wl_sae.bssid, rc));
+	re_log("re: deferred external SAE auth for %pM -> %d\n", wl_sae.bssid, rc);
 }
 
 static s32
@@ -1093,18 +1379,79 @@ wl_cfg80211_connect(struct wiphy *wiphy, struct net_device *dev,
 		return -EOPNOTSUPP;
 	}
 
+	/* The blob can only do 802.11w together with SAE (we supply the RSN element and the PMF handling
+	 * for that). A WPA2-PSK join is built by the blob alone, with an RSN element that has no PMF bits,
+	 * so "PMF required" (MFPR in the RSN element) would silently connect without PMF. Fail closed
+	 * instead. "Optional" (MFPC only) is fine: it means "if possible". */
+	re_log("re: connect request: mfp=%d sae=%d rsn_mfpr=%d ie_len=%zu akms=%d wpa_versions=0x%x\n",
+	       sme->mfp, wl_sme_is_sae(sme), wl_rsn_ie_mfpr(sme->ie, sme->ie_len), sme->ie_len,
+	       sme->crypto.n_akm_suites, sme->crypto.wpa_versions);
+	if (!wl_sme_is_sae(sme) && wl_rsn_ie_mfpr(sme->ie, sme->ie_len)) {
+		pr_warn_ratelimited("wl: refusing the connection: protected management frames (802.11w) are required, "
+		                    "but only WPA3-SAE supports them with this driver; use WPA3 or set PMF to optional/disabled\n");
+		return -EOPNOTSUPP;
+	}
+
 	WL_DBG(("ie (%p), ie_len (%zd)\n", sme->ie, sme->ie_len));
 	/* Capture wpa_supplicant's assoc IEs (RSN + RSNXE) so the firmware can emit them
 	 * verbatim in the SAE assoc-req (see wl_re_drive_assoc). */
 	wl_sae.assoc_ie_len = 0;
 	wl_sae.pmf_active = false;   /* re-armed when the IGTK installs after the 4-way */
-	if (sme->ie && sme->ie_len && sme->ie_len <= sizeof(wl_sae.assoc_ie)) {
-		memcpy(wl_sae.assoc_ie, sme->ie, sme->ie_len);
-		wl_sae.assoc_ie_len = (u16)sme->ie_len;
+	if (sme->ie && sme->ie_len) {
+		/* Only the RSN (+RSNX) elements: the blob pastes this buffer into its assoc request next to its
+		 * own capability IEs, so wpa_supplicant's Extended Capabilities / Supported Operating Classes
+		 * would be sent twice and confuse the AP. */
+		const u8 *ie = sme->ie;
+		size_t left = sme->ie_len;
+
+		while (left >= 2 && (size_t)ie[1] + 2 <= left) {
+			size_t el = (size_t)ie[1] + 2;
+
+			if ((ie[0] == WLAN_EID_RSN || ie[0] == WLAN_EID_RSNX) &&
+			    wl_sae.assoc_ie_len + el <= sizeof(wl_sae.assoc_ie)) {
+				memcpy(wl_sae.assoc_ie + wl_sae.assoc_ie_len, ie, el);
+				wl_sae.assoc_ie_len += (u16)el;
+			}
+			ie += el;
+			left -= el;
+		}
 		if (re_verbose)
 			print_hex_dump(KERN_ERR, "re connIE: ", DUMP_PREFIX_OFFSET, 16, 1,
 			               sme->ie, sme->ie_len > 96 ? 96 : (int)sme->ie_len, false);
 	}
+
+	/* Decide ONCE whether this is a WPA3-SAE connection (also for WPA2/WPA3 transition APs:
+	 * wpa_supplicant offers SAE there, and we must not let the blob fall back to PSK). */
+	if (!wl_sae.inited) {
+		INIT_DELAYED_WORK(&wl_sae.work, wl_sae_ext_auth_work);
+		INIT_WORK(&wl_sae.saq_work, wl_re_saq_work);
+		INIT_DELAYED_WORK(&wl_sae.assoc_wd, wl_sae_assoc_wd_work);
+		INIT_WORK(&wl_sae.dd_work, wl_re_dd_work);
+		INIT_DELAYED_WORK(&wl_sae.saq_chk, wl_re_saq_chk_work);
+		INIT_DELAYED_WORK(&wl_sae.retry_work, wl_sae_retry_work);
+		INIT_DELAYED_WORK(&wl_sae.join_work, wl_sae_join_work);
+		INIT_DELAYED_WORK(&wl_sae.hs_wd, wl_sae_hs_wd_work);
+		atomic_set(&wl_sae.txfail_cnt, 0);
+		atomic64_set(&wl_sae.tx_pn, 0x1000000);   /* start well above any short-session data PN */
+		wl_sae.inited = true;
+	}
+	wl_sae.dev = dev;
+	cancel_delayed_work_sync(&wl_sae.work);       /* a start scheduled by a previous attempt */
+	cancel_delayed_work_sync(&wl_sae.retry_work);
+	cancel_delayed_work_sync(&wl_sae.join_work);
+	cancel_delayed_work_sync(&wl_sae.hs_wd);
+	wl_sae.assoc_status = 0;
+	wl_sae.retries = 0;
+	wl_sae.ptk_done = false;
+	cancel_delayed_work_sync(&wl_sae.assoc_wd);   /* stale watchdog of a previous attempt */
+	cancel_delayed_work_sync(&wl_sae.saq_chk);
+	wl_sae.saq_pending = false;
+	wl_sae.rx_mgmt_pn = 0;
+	wl_sae.rx_ba_pn = 0;
+	wl_re_release_assoc_ie();   /* a WPA2 connect must not reuse the previous SAE RSN IE */
+	wl_sae.sae_conn = wl_sme_is_sae(sme);
+	wl_sae.sae_ok = false;
+	wl_sae.freq = sme->channel ? sme->channel->center_freq : 0;
 
 	err = wl_set_auth_type(dev, sme);
 	if (err)
@@ -1121,6 +1468,11 @@ wl_cfg80211_connect(struct wiphy *wiphy, struct net_device *dev,
 	err = wl_set_key_mgmt(dev, sme);
 	if (err)
 		return err;
+	if (re_verbose) {
+		s32 wa = -1;
+		wl_dev_intvar_get(dev, "wpa_auth", &wa);
+		re_log("re: connect: wpa_versions=0x%x -> wpa_auth=0x%x\n", sme->crypto.wpa_versions, wa);
+	}
 
 	err = wl_set_set_sharedkey(dev, sme);
 	if (err)
@@ -1128,6 +1480,13 @@ wl_cfg80211_connect(struct wiphy *wiphy, struct net_device *dev,
 
 	valc = 1;
 	wl_dev_bufvar_set(dev, "wsec_restrict", &valc, 1);
+
+	/* The blob can only (re)associate with Open auth + its own PSK RSN IE. For SAE keep it
+	 * from roaming on its own, so a transition-mode AP can't silently pull us onto WPA2-PSK
+	 * (the guards in wl_bss_connect_done()/wl_notify_roaming_status() are the backstop).
+	 * Non-SAE connections get the stock behaviour back. Failures are non-fatal. */
+	if (wl_dev_intvar_set(dev, "roam_off", wl_sae.sae_conn ? 1 : 0))
+		re_log("re: roam_off failed\n");
 
 	if (sme->bssid) {
 		memcpy(wl->profile->bssid, sme->bssid, ETHER_ADDR_LEN);
@@ -1163,26 +1522,15 @@ wl_cfg80211_connect(struct wiphy *wiphy, struct net_device *dev,
 		WL_DBG(("ssid \"%s\", len (%d)\n", join_params.ssid.SSID,
 		        join_params.ssid.SSID_len));
 	}
-	err = wl_dev_ioctl(dev, WLC_SET_SSID, &join_params, join_params_size);
-	if (err) {
-		WL_ERR(("error (%d)\n", err));
-		return err;
+	if (join_params_size <= sizeof(wl_sae.join_buf)) {
+		memcpy(wl_sae.join_buf, &join_params, join_params_size);
+		wl_sae.join_len = join_params_size;
+	} else {
+		wl_sae.join_len = 0;
 	}
-
-	set_bit(WL_STATUS_CONNECTING, &wl->status);
-
-	/* M3: for WPA3-SAE, ask userspace (wpa_supplicant) to run the SAE auth
-	 * exchange; it will build commit/confirm frames and TX them via .mgmt_tx. */
-	if (sme->auth_type == NL80211_AUTHTYPE_SAE ||
-	    (sme->crypto.n_akm_suites &&
-	     sme->crypto.akm_suites[0] == WLAN_AKM_SUITE_SAE)) {
-		if (!wl_sae.inited) {
-			INIT_DELAYED_WORK(&wl_sae.work, wl_sae_ext_auth_work);
-			INIT_WORK(&wl_sae.saq_work, wl_re_saq_work);
-			wl_sae.tx_pn = 0x1000000;   /* start well above any short-session data PN */
-			wl_sae.inited = true;
-		}
-		wl_sae.dev = dev;
+	/* M3: for WPA3-SAE the exchange is run by userspace (wpa_supplicant) via .external_auth and
+	 * .mgmt_tx; it is armed and scheduled in wl_sae_issue_join(). */
+	if (wl_sae.sae_conn) {
 		/* NetworkManager connects by SSID with NO fixed BSSID; the firmware picks the AP
 		 * and we capture its MAC from __wrap_wlc_sendauth (arg2). Only seed from sme->bssid
 		 * if it was given (e.g. a standalone wpa_supplicant config with bssid=). */
@@ -1192,12 +1540,39 @@ wl_cfg80211_connect(struct wiphy *wiphy, struct net_device *dev,
 			memset(wl_sae.bssid, 0, ETH_ALEN);
 		wl_sae.ssid.ssid_len = min_t(size_t, sme->ssid_len, sizeof(wl_sae.ssid.ssid));
 		memcpy(wl_sae.ssid.ssid, sme->ssid, wl_sae.ssid.ssid_len);
-		wl_sae.armed = 1;       /* arm the SAE hooks for this exchange */
-		WL_ERR(("re: scheduling external SAE auth (bssid %pM)\n", wl_sae.bssid));
-		/* a bit more delay when we must learn the BSSID from the firmware's auth TX */
-		schedule_delayed_work(&wl_sae.work, msecs_to_jiffies(sme->bssid ? 150 : 250));
 	}
 
+	/* Quiet time after the last disconnect: the AP needs a moment to finish with the old
+	 * association. Wait for it from a delayed work rather than sleeping here (see wl_sae_join_work). */
+	if (wl_sae.join_len && wl_sae.last_disc &&
+	    time_before(jiffies, wl_sae.last_disc + msecs_to_jiffies(WL_MIN_REJOIN_GAP_MS))) {
+		unsigned long delay = wl_sae.last_disc + msecs_to_jiffies(WL_MIN_REJOIN_GAP_MS) - jiffies;
+
+		re_log("re: deferring the join by %u ms (quiet time after the last disconnect)\n",
+		       jiffies_to_msecs(delay));
+		schedule_delayed_work(&wl_sae.join_work, delay);
+		return 0;
+	}
+
+	if (!wl_sae.join_len) {   /* request too large for the retry buffer: send it directly */
+		err = wl_dev_ioctl(dev, WLC_SET_SSID, &join_params, join_params_size);
+		if (err) {
+			WL_ERR(("error (%d)\n", err));
+			return err;
+		}
+		set_bit(WL_STATUS_CONNECTING, &wl->status);
+		re_log("re: CONNECTING set\n");
+		if (wl_sae.sae_conn) {
+			wl_sae.stub_seen = false;
+			wl_sae.armed = 1;
+			schedule_delayed_work(&wl_sae.work, msecs_to_jiffies(WL_SAE_START_FALLBACK_MS));
+		}
+		return 0;
+	}
+
+	err = wl_sae_issue_join(dev);
+	if (err)
+		WL_ERR(("error (%d)\n", err));
 	return err;
 }
 
@@ -1208,12 +1583,51 @@ wl_cfg80211_disconnect(struct wiphy *wiphy, struct net_device *dev, u16 reason_c
 	scb_val_t scbval;
 	s32 err = 0;
 
+	bool pmf = wl_sae.pmf_active;
+
+	wl_sae.last_disc = jiffies;
 	wl_sae.armed = 0;       /* disarm SAE hooks on disconnect */
+	if (wl_sae.inited) {
+		cancel_delayed_work_sync(&wl_sae.assoc_wd);
+		cancel_delayed_work_sync(&wl_sae.saq_chk);
+		cancel_delayed_work_sync(&wl_sae.retry_work);
+		cancel_delayed_work_sync(&wl_sae.join_work);
+		cancel_delayed_work_sync(&wl_sae.hs_wd);
+	}
+	wl_sae.saq_pending = false;
+	wl_re_release_assoc_ie();
+	wl_sae.sae_conn = false;
+	wl_sae.sae_ok = false;
 	wl_sae.pmf_active = false;
 	wl_sae.bsscfg = NULL;
 	WL_DBG(("Reason %d\n", reason_code));
 
 	if (wl->profile->active) {
+		/* With 802.11w the AP ignores the blob's unprotected deauth/disassoc and keeps a stale
+		 * association, which then makes the next join to that BSS stall or get rejected. Tell it
+		 * properly with a CCMP-protected deauth (software CCMP, like the SA-Query response). */
+		if (pmf && wl_sae.tk_set) {
+			int try, rc;
+
+			/* The blob gives up on a frame after a few un-ACKed attempts and only tells us with a
+			 * WLC_E_TXFAIL event. A deauth the AP never received leaves it holding the old
+			 * association (-> "try again later" on the next join), so look for that event and
+			 * retransmit before tearing the radio state down. */
+			for (try = 0; try < 3; try++) {
+				int before = atomic_read(&wl_sae.txfail_cnt);
+
+				rc = wl_re_send_protected_deauth(dev, reason_code ? reason_code :
+				                                 WLAN_REASON_DEAUTH_LEAVING);
+				re_log("re: protected deauth #%d -> %d\n", try + 1, rc);
+				if (rc)
+					break;
+				msleep(WL_DEAUTH_SETTLE_MS);   /* time to leave the air, and for a TXFAIL to be reported */
+				if (atomic_read(&wl_sae.txfail_cnt) == before)
+					break;          /* no TX failure reported: the AP ACKed it */
+				re_log("re: protected deauth was not acknowledged -> retransmitting\n");
+			}
+			wl_sae.tk_set = false;
+		}
 		memcpy(&scbval.ea, &wl->bssid, ETHER_ADDR_LEN);
 		scbval.val = htod32(reason_code);
 		err = wl_dev_ioctl(dev, WLC_DISASSOC, &scbval, sizeof(scbval));
@@ -1228,7 +1642,11 @@ wl_cfg80211_disconnect(struct wiphy *wiphy, struct net_device *dev, u16 reason_c
 	return err;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+static s32
+wl_cfg80211_set_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev, int radio_idx,
+                         enum nl80211_tx_power_setting type, s32 mbm)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0)
 static s32
 wl_cfg80211_set_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev,
                          enum nl80211_tx_power_setting type, s32 mbm)
@@ -1289,7 +1707,9 @@ wl_cfg80211_set_tx_power(struct wiphy *wiphy, enum tx_power_setting type, s32 mb
 	return err;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+static s32 wl_cfg80211_get_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev, int radio_idx, unsigned int link_id, s32 *dbm)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
 static s32 wl_cfg80211_get_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev, u32 /*link_id*/, s32 *dbm)
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0)
 static s32 wl_cfg80211_get_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev, s32 *dbm)
@@ -1337,6 +1757,7 @@ wl_cfg80211_config_default_key(struct wiphy *wiphy,
 	index = (u32) key_idx;
 	index = htod32(index);
 	err = wl_dev_ioctl(dev, WLC_SET_KEY_PRIMARY, &index, sizeof(index));
+	re_log("re: set_default_key idx=%u -> %d\n", key_idx, err);
 	if (err) {
 		WL_DBG(("error (%d)\n", err));
 	}
@@ -1344,7 +1765,12 @@ wl_cfg80211_config_default_key(struct wiphy *wiphy,
 	return 0;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+static s32
+wl_cfg80211_add_key(struct wiphy *wiphy, struct wireless_dev *wdev,
+                    int link_id, u8 key_idx, bool pairwise, const u8 *mac_addr,
+                    struct key_params *params)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 static s32
 wl_cfg80211_add_key(struct wiphy *wiphy, struct net_device *dev,
                     int link_id, u8 key_idx, bool pairwise, const u8 *mac_addr,
@@ -1359,6 +1785,9 @@ wl_cfg80211_add_key(struct wiphy *wiphy, struct net_device *dev,
                     u8 key_idx, const u8 *mac_addr, struct key_params *params)
 #endif
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	struct net_device *dev = wdev->netdev;
+#endif
 	struct wl_cfg80211_priv *wl = ndev_to_wl(dev);
 	struct wl_wsec_key key;
 	s32 secval, secnew = 0;
@@ -1379,8 +1808,8 @@ wl_cfg80211_add_key(struct wiphy *wiphy, struct net_device *dev,
 				memcpy(wl_sae.igtk_ipn, params->seq, 6);
 			wl_sae.pmf_active = true;   /* MFP is now active -> enforce SW PMF on RX */
 		}
-		WL_ERR(("re add_key: IGTK/BIP (idx=%u cipher=0x%x) stored SW; PMF active (no HW BIP)\n",
-		        (unsigned)key_idx, params->cipher));
+		re_log("re add_key: IGTK/BIP (idx=%u cipher=0x%x) stored SW; PMF active (no HW BIP)\n",
+		        (unsigned)key_idx, params->cipher);
 		return 0;
 	}
 	/* Capture the pairwise CCMP temporal key (PTK TK) for the SW SA-Query crypto. */
@@ -1388,7 +1817,10 @@ wl_cfg80211_add_key(struct wiphy *wiphy, struct net_device *dev,
 	    params->key && params->key_len == 16) {
 		memcpy(wl_sae.tk, params->key, 16);
 		wl_sae.tk_set = true;
-		WL_ERR(("re add_key: captured pairwise CCMP TK for SW mgmt crypto\n"));
+		wl_re_fast_key(wl_sae.tk);
+		re_log("re add_key: captured pairwise CCMP TK for SW mgmt crypto\n");
+		wl_sae.ptk_done = true;
+		cancel_delayed_work(&wl_sae.hs_wd);
 	}
 
 	memset(&key, 0, sizeof(key));
@@ -1505,7 +1937,11 @@ wl_cfg80211_add_key(struct wiphy *wiphy, struct net_device *dev,
 	return err;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+static s32
+wl_cfg80211_del_key(struct wiphy *wiphy, struct wireless_dev *wdev,
+                    int link_id, u8 key_idx, bool pairwise, const u8 *mac_addr)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 static s32
 wl_cfg80211_del_key(struct wiphy *wiphy, struct net_device *dev,
                     int link_id, u8 key_idx, bool pairwise, const u8 *mac_addr)
@@ -1519,6 +1955,9 @@ wl_cfg80211_del_key(struct wiphy *wiphy, struct net_device *dev,
                     u8 key_idx, const u8 *mac_addr)
 #endif
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	struct net_device *dev = wdev->netdev;
+#endif
 	struct wl_wsec_key key;
 	s32 err = 0;
 
@@ -1552,7 +1991,13 @@ wl_cfg80211_del_key(struct wiphy *wiphy, struct net_device *dev,
 	return err;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+static s32
+wl_cfg80211_get_key(struct wiphy *wiphy, struct wireless_dev *wdev,
+                    int link_id, u8 key_idx, bool pairwise, const u8 *mac_addr,
+                    void *cookie,
+                    void (*callback) (void *cookie, struct key_params * params))
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 static s32
 wl_cfg80211_get_key(struct wiphy *wiphy, struct net_device *dev,
                     int link_id, u8 key_idx, bool pairwise, const u8 *mac_addr,
@@ -1570,6 +2015,9 @@ wl_cfg80211_get_key(struct wiphy *wiphy, struct net_device *dev,
                     void (*callback) (void *cookie, struct key_params * params))
 #endif
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	struct net_device *dev = wdev->netdev;
+#endif
 	struct key_params params;
 	struct wl_wsec_key key;
 	struct wl_cfg80211_priv *wl = wiphy_to_wl(wiphy);
@@ -1629,14 +2077,22 @@ wl_cfg80211_get_key(struct wiphy *wiphy, struct net_device *dev,
 static s32
 wl_cfg80211_get_station(struct wiphy *wiphy, struct net_device *dev,
                         u8 *mac, struct station_info *sinfo)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+static s32
+wl_cfg80211_get_station(struct wiphy *wiphy, struct wireless_dev *wdev,
+                        const u8 *mac, struct station_info *sinfo)
 #else
 static s32
 wl_cfg80211_get_station(struct wiphy *wiphy, struct net_device *dev,
                         const u8 *mac, struct station_info *sinfo)
 #endif
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	struct net_device *dev = wdev->netdev;
+#endif
 	struct wl_cfg80211_priv *wl = wiphy_to_wl(wiphy);
 	scb_val_t scb_val;
+
 	int rssi;
 	s32 rate;
 	s32 err = 0;
@@ -1985,6 +2441,12 @@ static int wl_cfg80211_resume(struct wiphy *wiphy)
 			rekey->replay_counter, GFP_KERNEL);
 	}
 #endif 
+	/* After sleeping the AP may have dropped us without us noticing: probe with an SA Query. */
+	if (wl_sae.inited && wl_sae.pmf_active && wl_sae.tk_set && !wl_sae.dd_busy) {
+		wl_sae.dd_kind = 1;
+		wl_sae.dd_busy = true;
+		schedule_work(&wl_sae.dd_work);
+	}
 	return 0;
 }
 #endif 
@@ -1998,16 +2460,27 @@ extern void wl_re_drive_assoc(struct net_device *dev, void *bsscfg, const unsign
  * via the firmware, then report tx-status so the SAE state machine advances. */
 static int
 wl_cfg80211_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
-                    struct cfg80211_mgmt_tx_params *params, u64 *cookie)
+                    struct cfg80211_mgmt_tx_params *params,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+                    u64 cookie_in)
+#else
+                    u64 *cookie)
+#endif
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+	u64 cookie_val = cookie_in;
+	u64 *cookie = &cookie_val;   /* cfg80211 now assigns the cookie (by value) */
+#endif
 	struct net_device *dev = wdev ? wdev->netdev : NULL;
 	const u8 *f = params->buf;
 	int flen = (int)params->len;
 	u16 fc, alg = 0;
 	int err;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 3, 0)
 	if (cookie)
 		*cookie = (u64)(uintptr_t)f;
+#endif
 	if (!dev || !f || flen < 24)
 		return -EINVAL;
 	fc = f[0] | (f[1] << 8);
@@ -2017,8 +2490,8 @@ wl_cfg80211_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 		alg = f[24] | (f[25] << 8);
 
 	err = wl_re_mgmt_tx(dev, f, flen, wl_sae.scb);
-	WL_ERR(("re mgmt_tx: %d-byte frame auth_alg=%u da=%pM scb=%px -> %d\n",
-	        flen, alg, f + 4, wl_sae.scb, err));
+	re_log("re mgmt_tx: %d-byte frame auth_alg=%u da=%pM scb=%px -> %d\n",
+	        flen, alg, f + 4, wl_sae.scb, err);
 	if (cookie)
 		cfg80211_mgmt_tx_status(wdev, *cookie, f, flen, err == 0, GFP_KERNEL);
 	return err;
@@ -2033,10 +2506,26 @@ wl_cfg80211_external_auth(struct wiphy *wiphy, struct net_device *dev,
 	/* SAE succeeded -> drive the firmware from auth state into association, feeding it
 	 * wpa_supplicant's RSN+RSNXE so the assoc-req matches the SAE+MFP AP. */
 	if (params->status == 0 && wl_sae.bsscfg) {
-		WL_ERR(("re: SAE ok -> driving firmware to associate (assoc_ie_len=%u)\n",
-		        wl_sae.assoc_ie_len));
+		wl_sae.sae_ok = true;
+		re_log("re: SAE ok -> driving firmware to associate (assoc_ie_len=%u)\n",
+		        wl_sae.assoc_ie_len);
 		wl_re_drive_assoc(dev, wl_sae.bsscfg, wl_sae.bssid,
 		                  wl_sae.assoc_ie, wl_sae.assoc_ie_len);
+		schedule_delayed_work(&wl_sae.assoc_wd, msecs_to_jiffies(WL_SAE_ASSOC_TIMEOUT_MS));
+	} else if (params->status != 0) {
+		/* SAE failed: abort the pending firmware join NOW so it can't fall back to an
+		 * Open/PSK association, and fail the connect so wpa_supplicant retries SAE. */
+		struct wl_cfg80211_priv *wl = ndev_to_wl(dev);
+		scb_val_t scbval;
+		re_log("re: SAE FAILED (status %u) -> aborting join\n", params->status);
+		wl_sae.sae_ok = false;
+		memset(&scbval, 0, sizeof(scbval));
+		memcpy(&scbval.ea, wl_sae.bssid, ETHER_ADDR_LEN);
+		scbval.val = htod32(WLAN_REASON_UNSPECIFIED);
+		wl_dev_ioctl(dev, WLC_DISASSOC, &scbval, sizeof(scbval));
+		if (test_and_clear_bit(WL_STATUS_CONNECTING, &wl->status))
+			cfg80211_connect_result(dev, wl_sae.bssid, NULL, 0, NULL, 0,
+			                        WLAN_STATUS_UNSPECIFIED_FAILURE, GFP_KERNEL);
 	}
 	wl_sae.armed = 0;       /* SAE done -> disarm the RX hook (no more auth frames) */
 	return 0;
@@ -2080,8 +2569,8 @@ static __maybe_unused void wl_re_rx_auth(struct net_device *dev, const unsigned 
 	memcpy(buf + 16, wl_sae.bssid, 6);       /* BSSID = AP */
 	buf[22] = 0;   buf[23] = 0;              /* seq ctl */
 	memcpy(buf + 24, body, len);             /* auth body (alg/seq/status + SAE) */
-	cfg80211_rx_mgmt(wdev, 2447, 0, buf, 24 + len, 0);
-	WL_ERR(("re rx_auth: delivered %u-byte SAE auth body up to userspace\n", len));
+	cfg80211_rx_mgmt(wdev, wl_sae.freq ? wl_sae.freq : 2447, 0, buf, 24 + len, 0);
+	re_log("re rx_auth: delivered %u-byte SAE auth body up to userspace\n", len);
 	kfree(buf);
 }
 
@@ -2096,6 +2585,8 @@ long __wrap_wlc_sendauth(void *a1, void *a2, void *a3, void *a4, int alg,
 	/* Let the firmware's auth SEND proceed so it enters the authenticating state
 	 * (needed for the RX dispatch to route the AP's auth reply to us). The stub it
 	 * emits is harmless (AP rejects it); wpa_supplicant drives the real SAE in parallel. */
+	long ret;
+
 	if (alg == 3) {
 		wl_sae.bsscfg = a1;     /* capture bsscfg for the post-SAE assoc drive */
 		wl_sae.scb = a4;        /* capture AP scb (wlc_sendauth arg4) for host mgmt TX */
@@ -2107,7 +2598,13 @@ long __wrap_wlc_sendauth(void *a1, void *a2, void *a3, void *a4, int alg,
 		re_log("re: firmware auth alg=3 seq=%d bssid=%pM bsscfg=%px scb=%px (passthrough)\n",
 		       seq, wl_sae.bssid, a1, a4);
 	}
-	return wlc_sendauth(a1, a2, a3, a4, alg, seq, status, a8, a9, a10);
+	ret = wlc_sendauth(a1, a2, a3, a4, alg, seq, status, a8, a9, a10);
+	if (alg == 3 && wl_sae.armed && wl_sae.inited && !wl_sae.stub_seen) {
+		/* the stub is out: now (and only now) let wpa_supplicant start the real SAE exchange */
+		wl_sae.stub_seen = true;
+		mod_delayed_work(system_wq, &wl_sae.work, msecs_to_jiffies(WL_SAE_STUB_GRACE_MS));
+	}
+	return ret;
 }
 
 extern void wlc_authresp_client(void *bsscfg, long p2, unsigned short *body,
@@ -2154,24 +2651,41 @@ static void wl_re_ccmp_blocks(const u8 *h, const u8 *pn, u8 *nonce, u8 *aad)
 }
 
 static struct crypto_aead *wl_saq_tfm;   /* cached AES-CCM tfm (alloc once; serialized use) */
+static DEFINE_MUTEX(wl_saq_lock);        /* tfm + its key are shared by the SA-Query worker and the deauth */
 
-/* in-place AES-CCM over a fresh [aad||data] buffer using the cached, pre-keyed tfm.
+/* Lazily allocate the AES-CCM tfm once (process context) and key it with the current TK (cheap, done
+ * per call). Caller holds wl_saq_lock. */
+static int wl_re_ccm_setup(void)
+{
+	if (!wl_saq_tfm) {
+		wl_saq_tfm = crypto_alloc_aead("ccm(aes)", 0, 0);
+		if (IS_ERR(wl_saq_tfm)) {
+			wl_saq_tfm = NULL;
+			return -ENOMEM;
+		}
+		crypto_aead_setauthsize(wl_saq_tfm, 8);
+	}
+	return crypto_aead_setkey(wl_saq_tfm, wl_sae.tk, 16);
+}
+
+/* in-place AES-CCM over a fresh [aad||data] buffer using a pre-keyed tfm.
  * enc: data=pt(dlen) -> ct(dlen)+MIC(8). dec: data=ct(dlen)+MIC(8) -> pt(dlen). 0 on success. */
-static int wl_re_ccm(bool enc, const u8 *nonce, const u8 *aad, unsigned aadlen,
-                     u8 *data, unsigned dlen)
+static int wl_re_ccm_with(struct crypto_aead *tfm, gfp_t gfp, bool enc, const u8 *nonce, const u8 *aad,
+                          unsigned aadlen, u8 *data, unsigned dlen)
 {
 	struct aead_request *req; struct scatterlist sg;
 	u8 iv[16]; u8 *buf; int ret = -1; unsigned cl = dlen + 8;
-	if (!wl_saq_tfm)
+	if (!tfm)
 		return -1;
-	req = aead_request_alloc(wl_saq_tfm, GFP_KERNEL);
+	req = aead_request_alloc(tfm, gfp);
 	if (!req) return -1;
 	iv[0] = 1; memcpy(iv + 1, nonce, 13); iv[14] = 0; iv[15] = 0;
-	buf = kmalloc(aadlen + cl, GFP_KERNEL);
+	buf = kmalloc(aadlen + cl, gfp);
 	if (!buf) goto out_req;
 	memcpy(buf, aad, aadlen);
 	memcpy(buf + aadlen, data, enc ? dlen : cl);
 	sg_init_one(&sg, buf, aadlen + cl);
+	aead_request_set_callback(req, 0, NULL, NULL);
 	aead_request_set_ad(req, aadlen);
 	aead_request_set_crypt(req, &sg, &sg, enc ? dlen : cl, iv);
 	ret = enc ? crypto_aead_encrypt(req) : crypto_aead_decrypt(req);
@@ -2183,26 +2697,213 @@ out_req:
 	return ret;
 }
 
+static int wl_re_ccm(bool enc, const u8 *nonce, const u8 *aad, unsigned aadlen, u8 *data, unsigned dlen)
+{
+	return wl_re_ccm_with(wl_saq_tfm, GFP_KERNEL, enc, nonce, aad, aadlen, data, dlen);
+}
+
+/* ===== Block Ack (ADDBA/DELBA) through PMF =====
+ * With 802.11w the AP protects its Block-Ack action frames (robust category 3), which the blob
+ * cannot decrypt, and the AP drops the blob's own unprotected ones. Without a Block-Ack agreement
+ * there is no frame aggregation and the AP keeps re-sending its ADDBA Request (seen: 14 Mbit/s
+ * instead of ~190). These frames are handled in the blob's RX/TX context (atomic), so they need a
+ * synchronous AES-CCM tfm of their own, used under a spinlock.
+ *   re_pmf_ba = 0: off (old behaviour), 1: decline the AP's ADDBA (protected response, no aggregation),
+ *               2: decrypt the AP's Block-Ack frames for the blob and protect the blob's ones.
+ *   re_ba_rxclr: RxStatus1 bits to clear in the rx header of a re-injected frame (diagnostic). */
+int re_pmf_ba = 2;
+module_param(re_pmf_ba, int, 0644);
+MODULE_PARM_DESC(re_pmf_ba, "802.11w Block Ack: 0=off, 1=decline the AP's ADDBA, 2=full (default)");
+int re_pmf_stall = 1;
+module_param(re_pmf_stall, int, 0644);
+MODULE_PARM_DESC(re_pmf_stall, "PMF link with most frames retried for 12 s: 0=off, 1=probe the AP only (default), 2=also drop the link after 3 such windows, 3=test mode (every window counts as bad, drops)");
+unsigned int re_ba_rxclr;
+module_param(re_ba_rxclr, uint, 0644);
+MODULE_PARM_DESC(re_ba_rxclr, "debug: RxStatus1 bits to clear on re-injected Block-Ack frames");
+
+static struct crypto_aead *wl_re_fast_tfm;
+static DEFINE_SPINLOCK(wl_re_fast_lock);
+static bool wl_re_fast_ok;
+
+static void wl_re_fast_key(const u8 *tk)
+{
+	unsigned long fl;
+
+	if (!wl_re_fast_tfm) {
+		struct crypto_aead *t = crypto_alloc_aead("ccm(aes)", 0, CRYPTO_ALG_ASYNC);
+
+		if (IS_ERR(t)) {
+			re_log("re ba: no synchronous ccm(aes) (%ld) -> Block Ack under PMF disabled\n", PTR_ERR(t));
+			return;
+		}
+		crypto_aead_setauthsize(t, 8);
+		wl_re_fast_tfm = t;
+	}
+	spin_lock_irqsave(&wl_re_fast_lock, fl);
+	wl_re_fast_ok = crypto_aead_setkey(wl_re_fast_tfm, tk, 16) == 0;
+	spin_unlock_irqrestore(&wl_re_fast_lock, fl);
+}
+
+static void wl_re_crypto_exit(void)
+{
+	unsigned long fl;
+	struct crypto_aead *t;
+
+	spin_lock_irqsave(&wl_re_fast_lock, fl);
+	wl_re_fast_ok = false;
+	t = wl_re_fast_tfm;
+	wl_re_fast_tfm = NULL;
+	spin_unlock_irqrestore(&wl_re_fast_lock, fl);
+	if (t)
+		crypto_free_aead(t);
+	if (wl_saq_tfm) {
+		crypto_free_aead(wl_saq_tfm);
+		wl_saq_tfm = NULL;
+	}
+}
+
+/* atomic-context AES-CCM with the synchronous tfm; dlen <= 48 */
+static int wl_re_ccm_fast(bool enc, const u8 *nonce, const u8 *aad, u8 *data, unsigned dlen)
+{
+	unsigned long fl;
+	int ret;
+
+	if (dlen > 48)
+		return -EMSGSIZE;
+	spin_lock_irqsave(&wl_re_fast_lock, fl);
+	ret = wl_re_fast_ok ? wl_re_ccm_with(wl_re_fast_tfm, GFP_ATOMIC, enc, nonce, aad, 22, data, dlen) : -ENOKEY;
+	spin_unlock_irqrestore(&wl_re_fast_lock, fl);
+	return ret;
+}
+
+static inline u64 wl_re_ccmp_pn(const u8 *p)   /* PN from the 8-byte CCMP header */
+{
+	return (u64)p[0] | (u64)p[1] << 8 | (u64)p[4] << 16 | (u64)p[5] << 24 | (u64)p[6] << 32 | (u64)p[7] << 40;
+}
+
+/* RX, atomic context. skb->data + q = protected action frame from the AP (24B header, CCMP header,
+ * ciphertext, MIC, FCS). Returns 1 if it was a Block-Ack frame and the skb now holds the same frame
+ * unprotected and in plaintext (hand it to the blob), -1 to drop it, 0 if it is not for us. */
+static int wl_re_ba_rx(struct sk_buff *skb, unsigned int q)
+{
+	u8 *p = skb->data + q;
+	unsigned int flen = skb->len - q;
+	u8 nonce[13], aad[22], pn[6], pt[56];
+	int ctlen = (int)flen - 4 - 24 - 8 - 8;
+	u64 pn64;
+
+	if (re_pmf_ba < 2 || !wl_sae.tk_set || ctlen < 4 || ctlen > 48 || !(p[27] & 0x20) ||
+	    memcmp(p + 16, wl_sae.bssid, 6) != 0)
+		return 0;
+	pn[0] = p[24]; pn[1] = p[25]; pn[2] = p[28]; pn[3] = p[29]; pn[4] = p[30]; pn[5] = p[31];
+	wl_re_ccmp_blocks(p, pn, nonce, aad);
+	memcpy(pt, p + 32, ctlen + 8);
+	if (wl_re_ccm_fast(false, nonce, aad, pt, ctlen) != 0 || pt[0] != 3)
+		return 0;                       /* not decryptable here, or not Block Ack: SA-Query path */
+	pn64 = wl_re_ccmp_pn(p + 24);
+	if (pn64 <= wl_sae.rx_ba_pn) {
+		re_log("re ba: replayed protected BA frame pn=%llu <= %llu -> dropped\n",
+		       (unsigned long long)pn64, (unsigned long long)wl_sae.rx_ba_pn);
+		return -1;
+	}
+	wl_sae.rx_ba_pn = pn64;
+	if (re_verbose) {
+		u16 st = q >= 6 ? skb->data[4] | (skb->data[5] << 8) : 0;
+
+		re_log("re ba: AP %s token=%02x rxstatus1=0x%04x -> blob\n",
+		       pt[1] == 0 ? "ADDBA req" : pt[1] == 1 ? "ADDBA resp" : pt[1] == 2 ? "DELBA" : "BA action",
+		       pt[2], st);
+	}
+	memcpy(p + 24, pt, ctlen);
+	memmove(p + 24 + ctlen, p + flen - 4, 4);       /* keep the FCS bytes */
+	p[1] &= ~0x40;                                  /* no longer protected */
+	skb_trim(skb, q + 24 + ctlen + 4);
+	if (re_ba_rxclr && q >= 6) {
+		u16 st = skb->data[4] | (skb->data[5] << 8);
+
+		st &= ~(u16)re_ba_rxclr;
+		skb->data[4] = st & 0xff;
+		skb->data[5] = st >> 8;
+	}
+	return 1;
+}
+
+/* TX, atomic context, from the blob's wlc_sendmgmt(): protect the blob's own Block-Ack action
+ * frame (ADDBA req/resp, DELBA) to the AP in place, like the AP does under PMF. */
+static void wl_re_ba_tx(struct sk_buff *skb)
+{
+	u8 nonce[13], aad[22], pn[6], pt[24];
+	unsigned int q, lim, blen;
+	u64 txpn;
+	u8 *p;
+
+	if (!skb || !wl_sae.dev || skb->len < 24 + 6 || skb->len > 160)
+		return;
+	lim = skb->len - (24 + 6);
+	if (lim > 64)
+		lim = 64;
+	for (q = 0; q <= lim; q++) {
+		p = skb->data + q;
+		if (p[0] == 0xd0 && !(p[1] & 0x40) && p[24] == 3 &&
+		    memcmp(p + 4, wl_sae.bssid, 6) == 0 &&
+		    memcmp(p + 10, wl_sae.dev->dev_addr, 6) == 0 &&
+		    memcmp(p + 16, wl_sae.bssid, 6) == 0)
+			break;
+	}
+	if (q > lim)
+		return;
+	blen = skb->len - q - 24;
+	if (blen < 4 || blen > 16)
+		return;
+	if (skb_tailroom(skb) < 16 && pskb_expand_head(skb, 0, 16, GFP_ATOMIC)) {
+		re_log("re ba: no tailroom for the CCMP MIC, frame sent unprotected\n");
+		return;
+	}
+	p = skb->data + q;
+	txpn = (u64)atomic64_fetch_inc(&wl_sae.tx_pn);
+	pn[0] = txpn & 0xff; pn[1] = (txpn >> 8) & 0xff; pn[2] = (txpn >> 16) & 0xff;
+	pn[3] = (txpn >> 24) & 0xff; pn[4] = (txpn >> 32) & 0xff; pn[5] = (txpn >> 40) & 0xff;
+	wl_re_ccmp_blocks(p, pn, nonce, aad);
+	memcpy(pt, p + 24, blen);
+	if (wl_re_ccm_fast(true, nonce, aad, pt, blen) != 0) {
+		re_log("re ba: CCMP encrypt failed, frame sent unprotected\n");
+		return;
+	}
+	re_log("re ba: protecting the blob's BA action act=%u len=%u pn=%llu\n",
+	       p[25], blen, (unsigned long long)txpn);
+	p[1] |= 0x40;                                   /* Protected Frame */
+	p[24] = pn[0]; p[25] = pn[1]; p[26] = 0; p[27] = 0x20;   /* CCMP header, key id 0 */
+	p[28] = pn[2]; p[29] = pn[3]; p[30] = pn[4]; p[31] = pn[5];
+	memcpy(p + 32, pt, blen + 8);
+	skb_put(skb, 16);
+}
+
+extern int wlc_sendmgmt(void *wlc, void *pkt, void *txq, void *scb, long a5, long a6);
+int __wrap_wlc_sendmgmt(void *wlc, void *pkt, void *txq, void *scb, long a5, long a6)
+{
+	if (re_pmf_ba >= 2 && wl_sae.pmf_active && wl_sae.tk_set)
+		wl_re_ba_tx((struct sk_buff *)pkt);
+	return wlc_sendmgmt(wlc, pkt, txq, scb, a5, a6);
+}
+
 /* Deferred (process-context) handler: SW-decrypt the captured protected action frame; if it is
  * an SA-Query Request, build + SW-encrypt + TX a protected SA-Query Response. */
 extern int wl_re_mgmt_tx(struct net_device *dev, const unsigned char *f, int flen, void *scb);
 extern void *wl_re_find_scb(struct net_device *dev, const unsigned char *mac);
+static int wl_re_tx_prot_locked(struct net_device *dev, u8 fc0, const u8 *body, unsigned int blen);
 static void wl_re_saq_work(struct work_struct *w)
 {
 	u8 *f = wl_sae.saq_frame;
 	unsigned int flen = wl_sae.saq_len;
 	u8 nonce[13], aad[22], pn[6], body[72];
 	int ctlen;
+	bool locked = false;
 
 	if (!wl_sae.tk_set || !wl_sae.dev || flen < 24 + 8 + 8 + 4 + 4)
 		goto done;
-	/* lazily allocate the AES-CCM tfm once (process context), re-key per call (cheap) */
-	if (!wl_saq_tfm) {
-		wl_saq_tfm = crypto_alloc_aead("ccm(aes)", 0, 0);
-		if (IS_ERR(wl_saq_tfm)) { wl_saq_tfm = NULL; goto done; }
-		crypto_aead_setauthsize(wl_saq_tfm, 8);
-	}
-	if (crypto_aead_setkey(wl_saq_tfm, wl_sae.tk, 16))
+	mutex_lock(&wl_saq_lock);
+	locked = true;
+	if (wl_re_ccm_setup())
 		goto done;
 	ctlen = (int)flen - 4 /*FCS*/ - 24 - 8 - 8;
 	if (ctlen <= 0 || ctlen > 60)
@@ -2217,10 +2918,26 @@ static void wl_re_saq_work(struct work_struct *w)
 	}
 	re_log("re saq: decrypted action cat=%u act=%u transid=%02x%02x ctlen=%d\n",
 	       body[0], body[1], ctlen >= 4 ? body[2] : 0, ctlen >= 4 ? body[3] : 0, ctlen);
+	if (ctlen >= 4 && body[0] == 8 && body[1] == 1) {   /* SA-Query Response to our request */
+		u16 tid = body[2] | (body[3] << 8);
+		if (wl_sae.saq_pending && tid == wl_sae.saq_tid) {
+			wl_sae.saq_pending = false;
+			cancel_delayed_work(&wl_sae.saq_chk);
+			re_log("re: SA-Query response tid=%04x -> association is alive\n", tid);
+		}
+	}
+	if (re_pmf_ba >= 1 && ctlen >= 9 && body[0] == 3 && body[1] == 0) {   /* ADDBA Request we can't serve */
+		/* The blob cannot take part in a protected Block-Ack setup (or re_pmf_ba=1): decline it
+		 * properly instead of leaving the AP to re-send the request for ever. */
+		u8 resp[9] = { 3, 1, body[2], WLAN_STATUS_REQUEST_DECLINED & 0xff, 0, body[3], body[4], 0, 0 };
+		int rc = wl_re_tx_prot_locked(wl_sae.dev, 0xd0, resp, sizeof(resp));
+
+		re_log("re ba: declined the AP's ADDBA Request token=%02x -> %d\n", body[2], rc);
+	}
 	if (ctlen >= 4 && body[0] == 8 && body[1] == 0) {   /* SA-Query Request */
 		u8 rh[24], pt[12], resp[44];
 		u8 rnonce[13], raad[22], rpn[6];
-		u64 txpn = wl_sae.tx_pn++;
+		u64 txpn = (u64)atomic64_fetch_inc(&wl_sae.tx_pn);
 		int rc;
 		void *scb;
 		rh[0] = 0xd0; rh[1] = 0x40; rh[2] = 0; rh[3] = 0;   /* action + protected */
@@ -2246,7 +2963,266 @@ static void wl_re_saq_work(struct work_struct *w)
 		       body[2], body[3], (unsigned long long)txpn, rc);
 	}
 done:
+	if (locked)
+		mutex_unlock(&wl_saq_lock);
 	wl_sae.saq_busy = false;
+}
+
+/* Build + TX a CCMP-protected robust management frame to the AP (process context only; caller holds
+ * wl_saq_lock and has run wl_re_ccm_setup()). fc0 = frame control byte 0 (0xc0 deauth, 0xa0 disassoc,
+ * 0xd0 action); body <= 16 bytes. */
+static int wl_re_tx_prot_locked(struct net_device *dev, u8 fc0, const u8 *body, unsigned int blen)
+{
+	u8 rh[24], pt[16 + 8], frame[24 + 8 + 16 + 8];
+	u8 nonce[13], aad[22], pn[6];
+	u64 txpn;
+	void *scb;
+	int rc;
+
+	txpn = (u64)atomic64_fetch_inc(&wl_sae.tx_pn);
+	rh[0] = fc0; rh[1] = 0x40; rh[2] = 0; rh[3] = 0;    /* Protected Frame */
+	memcpy(rh + 4, wl_sae.bssid, 6);                    /* A1 = AP */
+	memcpy(rh + 10, dev->dev_addr, 6);                  /* A2 = us */
+	memcpy(rh + 16, wl_sae.bssid, 6);                   /* A3 = AP */
+	rh[22] = 0; rh[23] = 0;
+	pn[0] = txpn & 0xff;         pn[1] = (txpn >> 8) & 0xff;  pn[2] = (txpn >> 16) & 0xff;
+	pn[3] = (txpn >> 24) & 0xff; pn[4] = (txpn >> 32) & 0xff; pn[5] = (txpn >> 40) & 0xff;
+	wl_re_ccmp_blocks(rh, pn, nonce, aad);
+	memcpy(pt, body, blen);
+	rc = wl_re_ccm(true, nonce, aad, 22, pt, blen);     /* -> blen bytes ciphertext + 8 bytes MIC */
+	if (rc)
+		return rc;
+	memcpy(frame, rh, 24);
+	frame[24] = pn[0]; frame[25] = pn[1]; frame[26] = 0; frame[27] = 0x20;   /* CCMP hdr, key 0 */
+	frame[28] = pn[2]; frame[29] = pn[3]; frame[30] = pn[4]; frame[31] = pn[5];
+	memcpy(frame + 32, pt, blen + 8);
+	scb = wl_re_find_scb(dev, wl_sae.bssid);
+	return scb ? wl_re_mgmt_tx(dev, frame, 24 + 8 + blen + 8, scb) : -ENOENT;
+}
+
+static int wl_re_send_protected_mgmt(struct net_device *dev, u8 fc0, const u8 *body, unsigned int blen)
+{
+	int rc;
+
+	if (!wl_sae.tk_set || blen == 0 || blen > 16)
+		return -ENOENT;
+	mutex_lock(&wl_saq_lock);
+	rc = wl_re_ccm_setup();
+	if (!rc)
+		rc = wl_re_tx_prot_locked(dev, fc0, body, blen);
+	mutex_unlock(&wl_saq_lock);
+	return rc;
+}
+
+static int wl_re_send_protected_deauth(struct net_device *dev, u16 reason)
+{
+	u8 b[2] = { reason & 0xff, reason >> 8 };
+
+	return wl_re_send_protected_mgmt(dev, 0xc0, b, sizeof(b));
+}
+
+/* The AP no longer talks to us (or we could not confirm it still does): behave like a link-down
+ * event so cfg80211/wpa_supplicant reconnect. Process context. */
+static void wl_re_assoc_lost(struct net_device *dev, u16 reason, const char *why)
+{
+	struct wl_cfg80211_priv *wl = ndev_to_wl(dev);
+	scb_val_t scbval;
+
+	if (!test_bit(WL_STATUS_CONNECTED, &wl->status)) {
+		re_log("re: assoc lost (%s) but already disconnected\n", why);
+		return;
+	}
+	re_log("re: association lost (%s, reason %u) -> disconnecting\n", why, reason);
+	wl_sae.saq_pending = false;
+	wl_sae.sae_ok = false;
+	wl_sae.pmf_active = false;
+	wl_sae.tk_set = false;
+	memset(&scbval, 0, sizeof(scbval));
+	memcpy(&scbval.ea, wl_sae.bssid, ETHER_ADDR_LEN);
+	scbval.val = htod32(reason);
+	wl_dev_ioctl(dev, WLC_DISASSOC, &scbval, sizeof(scbval));
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,2,0)
+	cfg80211_disconnected(dev, reason, NULL, 0, GFP_KERNEL);
+#else
+	cfg80211_disconnected(dev, reason, NULL, 0, false, GFP_KERNEL);
+#endif
+	clear_bit(WL_STATUS_CONNECTED, &wl->status);
+	wl_link_down(wl);
+	wl_init_prof(wl->profile);
+}
+
+#define WL_SAQ_RETRY_MS		300
+#define WL_SAQ_MAX_TRIES	3
+
+static void wl_re_saq_send(struct net_device *dev)
+{
+	u8 body[4] = { 8, 0, wl_sae.saq_tid & 0xff, wl_sae.saq_tid >> 8 };   /* SA Query Request */
+	int rc = wl_re_send_protected_mgmt(dev, 0xd0, body, sizeof(body));
+
+	wl_sae.saq_tries++;
+	re_log("re: SA-Query request #%d tid=%04x -> %d\n", wl_sae.saq_tries, wl_sae.saq_tid, rc);
+}
+
+/* Stalled-link detector, called once a second from the driver watchdog with the interface's frame
+ * counters. A PMF link can go bad without any deauth we would notice: the blob's rate control runs
+ * away to the top rate (1300 Mbit/s) after a scan, almost nothing we send is ACKed any more (about
+ * one retry per frame or worse, while the frames from the AP still trickle in), and the stack keeps
+ * showing "connected" (seen in soak tests: 90 s+ of dead link, no recovery without a manual
+ * reconnect). Judge 12 s windows (not the ones with a scan in them: those always show a burst of
+ * retries). A window with retries >= 70% of the frames sent makes us probe the AP with an SA Query:
+ * silence drops the link. If the probe is answered but the link stays that bad for 3 windows in a
+ * row, drop it anyway: a fresh association resets the blob's per-station state. */
+#define WL_STALL_WINDOW_S	12
+#define WL_STALL_MIN_RETRY	40
+#define WL_STALL_PROBE_GAP_S	30
+#define WL_STALL_FORCE_WINDOWS	3
+void wl_re_link_tick(struct net_device *dev, unsigned long tx, unsigned long retry)
+{
+	static unsigned long w_tx, w_retry, scan_seen, last_probe;
+	static unsigned int ticks, bad;
+	struct wl_cfg80211_priv *wl;
+	unsigned long dtx, dretry;
+
+	if (!wl_sae.inited || dev != wl_sae.dev || !wl_sae.pmf_active || !wl_sae.tk_set || re_pmf_stall == 0) {
+		ticks = 0; bad = 0;
+		return;
+	}
+	wl = ndev_to_wl(dev);
+	if (!test_bit(WL_STATUS_CONNECTED, &wl->status)) {
+		ticks = 0; bad = 0;
+		return;
+	}
+	if (wl->scan_request)
+		scan_seen = jiffies;
+	if (ticks == 0) {
+		w_tx = tx;
+		w_retry = retry;
+	}
+	if (++ticks < WL_STALL_WINDOW_S)
+		return;
+	ticks = 0;
+	dtx = tx - w_tx;
+	dretry = retry - w_retry;
+	if (re_pmf_stall == 3)                 /* test mode: pretend every window is bad */
+		dretry = WL_STALL_MIN_RETRY + 2 * dtx;
+	else if (time_before(jiffies, scan_seen + (WL_STALL_WINDOW_S + 3) * HZ)) {
+		bad = 0;                       /* a scan always costs a burst of retries */
+		return;
+	}
+	if (dretry < WL_STALL_MIN_RETRY || dretry * 10 < dtx * 7) {
+		bad = 0;
+		return;
+	}
+	bad++;
+	re_log("re: link stall? %lu retries for %lu frames in %d s (window %u)\n",
+	       dretry, dtx, WL_STALL_WINDOW_S, bad);
+	if (wl_sae.dd_busy || wl_sae.saq_pending)
+		return;
+	if (bad >= WL_STALL_FORCE_WINDOWS && re_pmf_stall >= 2) {
+		bad = 0;
+		wl_sae.dd_kind = 2;            /* drop the link */
+	} else if (bad < WL_STALL_FORCE_WINDOWS && time_after(jiffies, last_probe + WL_STALL_PROBE_GAP_S * HZ)) {
+		last_probe = jiffies;
+		wl_sae.dd_kind = 1;            /* SA Query */
+	} else {
+		return;
+	}
+	wl_sae.dd_busy = true;
+	schedule_work(&wl_sae.dd_work);
+}
+
+/* 802.11w 11.13: an unprotected "class 2/3" deauth must not be obeyed, but the association has to be
+ * verified. Ask the AP; a valid protected response means it is alive (ignore the frame), silence
+ * means it dropped us and we must reconnect. */
+static void wl_re_saq_start(struct net_device *dev, const char *why)
+{
+	if (wl_sae.saq_pending || !wl_sae.tk_set || !wl_sae.pmf_active)
+		return;
+	get_random_bytes(&wl_sae.saq_tid, sizeof(wl_sae.saq_tid));
+	wl_sae.saq_tries = 0;
+	wl_sae.saq_pending = true;
+	re_log("re: SA-Query started (%s)\n", why);
+	wl_re_saq_send(dev);
+	schedule_delayed_work(&wl_sae.saq_chk, msecs_to_jiffies(WL_SAQ_RETRY_MS));
+}
+
+static void wl_re_saq_chk_work(struct work_struct *w)
+{
+	struct net_device *dev = wl_sae.dev;
+
+	if (!wl_sae.saq_pending)
+		return;
+	if (!dev || !wl_sae.pmf_active) {
+		wl_sae.saq_pending = false;
+		return;
+	}
+	if (wl_sae.saq_tries >= WL_SAQ_MAX_TRIES) {
+		wl_sae.saq_pending = false;
+		wl_re_assoc_lost(dev, WLAN_REASON_UNSPECIFIED, "no SA-Query response");
+		return;
+	}
+	wl_re_saq_send(dev);
+	schedule_delayed_work(&wl_sae.saq_chk, msecs_to_jiffies(WL_SAQ_RETRY_MS));
+}
+
+static void wl_re_dd_work(struct work_struct *w)
+{
+	struct net_device *dev = wl_sae.dev;
+	u8 *f = wl_sae.dd_frame;
+	unsigned int flen = wl_sae.dd_len;
+	u8 nonce[13], aad[22], pn[6], buf[2 + 8];
+	u64 pn64;
+	bool locked = false;
+	u16 reason;
+
+	if (!dev || !wl_sae.pmf_active)
+		goto done;
+	if (wl_sae.dd_kind == 1) {
+		wl_re_saq_start(dev, "link check (after resume / retries)");
+		goto done;
+	}
+	if (wl_sae.dd_kind == 2) {
+		wl_re_assoc_lost(dev, WLAN_REASON_UNSPECIFIED, "most transmissions fail, link unusable");
+		goto done;
+	}
+	if (flen < 26)
+		goto done;
+	if (!wl_sae.dd_prot) {
+		reason = f[24] | (f[25] << 8);
+		if (reason == 6 || reason == 7)
+			wl_re_saq_start(dev, "unprotected class 2/3 deauth");
+		goto done;
+	}
+	/* protected deauth/disassoc: CCMP hdr(8) + reason(2) + MIC(8) after the 24-byte header */
+	if (!wl_sae.tk_set || flen < 24 + 8 + 2 + 8)
+		goto done;
+	pn[0] = f[24]; pn[1] = f[25]; pn[2] = f[28]; pn[3] = f[29]; pn[4] = f[30]; pn[5] = f[31];
+	pn64 = (u64)pn[0] | ((u64)pn[1] << 8) | ((u64)pn[2] << 16) | ((u64)pn[3] << 24) |
+	       ((u64)pn[4] << 32) | ((u64)pn[5] << 40);
+	if (pn64 <= wl_sae.rx_mgmt_pn) {
+		re_log("re: protected deauth/disassoc replayed (pn %llu <= %llu) -> ignored\n",
+		       (unsigned long long)pn64, (unsigned long long)wl_sae.rx_mgmt_pn);
+		goto done;
+	}
+	mutex_lock(&wl_saq_lock);
+	locked = true;
+	if (wl_re_ccm_setup())
+		goto done;
+	wl_re_ccmp_blocks(f, pn, nonce, aad);
+	memcpy(buf, f + 32, 2 + 8);
+	if (wl_re_ccm(false, nonce, aad, 22, buf, 2) != 0) {
+		re_log("re: protected deauth/disassoc: CCMP verify FAILED -> ignored\n");
+		goto done;
+	}
+	wl_sae.rx_mgmt_pn = pn64;
+	reason = buf[0] | (buf[1] << 8);
+	mutex_unlock(&wl_saq_lock);
+	locked = false;
+	wl_re_assoc_lost(dev, reason, f[0] == 0xc0 ? "protected deauth from AP" : "protected disassoc from AP");
+done:
+	if (locked)
+		mutex_unlock(&wl_saq_lock);
+	wl_sae.dd_busy = false;
 }
 /* ===== end SW CCMP / SA-Query ===== */
 
@@ -2285,7 +3261,7 @@ void __wrap_wlc_recv(void *wlc, void *pkt)
 					 * entirely out of the SAE auth exchange is the clean architecture. */
 					if (stv == 0 && wl_sae.dev->ieee80211_ptr) {
 						bool ok = cfg80211_rx_mgmt(wl_sae.dev->ieee80211_ptr,
-						                           2447, 0, f, flen, 0);
+						                           wl_sae.freq ? wl_sae.freq : 2447, 0, f, flen, 0);
 						re_log("re: forwarded SAE frame -> userspace, delivered=%d\n", ok);
 					}
 					wl_re_pktfree(wl_sae.dev, pkt);   /* free RX skb ourselves */
@@ -2313,17 +3289,58 @@ void __wrap_wlc_recv(void *wlc, void *pkt)
 			    (memcmp(skb->data + q + 4, me, 6) == 0 ||
 			     (skb->data[q + 4] & 1))) {                           /* DA = us or mcast */
 				if ((fc1 & 0x40) == 0) {                             /* Protected-Frame bit clear */
-					re_log("re pmf: DROP unprotected %s from AP (spoofed-deauth defense)\n",
-					       fc0 == 0xc0 ? "deauth" : "disassoc");
+					unsigned int fl = skb->len - q;
+					unsigned int rsn = q + 26 <= skb->len ? skb->data[q + 24] | (skb->data[q + 25] << 8) : 0;
+					re_log("re pmf: DROP unprotected %s from AP, reason %u (spoofed-deauth defense)\n",
+					       fc0 == 0xc0 ? "deauth" : "disassoc", rsn);
+					/* "Class 2/3 frame from non-associated STA" (6/7) is what the AP sends when
+					 * it no longer knows us. 802.11w: don't obey it, but check with an SA Query. */
+					if ((rsn == 6 || rsn == 7) && !wl_sae.dd_busy && fl <= sizeof(wl_sae.dd_frame)) {
+						memcpy(wl_sae.dd_frame, skb->data + q, fl);
+						wl_sae.dd_len = fl;
+						wl_sae.dd_prot = false;
+						wl_sae.dd_kind = 0;
+						wl_sae.dd_busy = true;
+						schedule_work(&wl_sae.dd_work);
+					}
 					wl_re_pktfree(wl_sae.dev, pkt);
 					return;
 				}
-				break;   /* protected -> let the firmware decrypt + honor it */
+				{
+					unsigned int fl = skb->len - q;
+					re_log("re pmf: PROTECTED %s from AP (len %u) -> verifying in software\n",
+					       fc0 == 0xc0 ? "deauth" : "disassoc", fl);
+					/* the blob cannot decrypt management frames: verify + honour it ourselves */
+					if (!wl_sae.dd_busy && wl_sae.tk_set && fl <= sizeof(wl_sae.dd_frame)) {
+						memcpy(wl_sae.dd_frame, skb->data + q, fl);
+						wl_sae.dd_len = fl;
+						wl_sae.dd_prot = true;
+						wl_sae.dd_kind = 0;
+						wl_sae.dd_busy = true;
+						schedule_work(&wl_sae.dd_work);
+					}
+				}
+				break;
 			}
 			/* A protected ACTION frame from the AP -> likely an 802.11w SA-Query Request the
 			 * blob can't decrypt. Copy it out and hand to the deferred SW-CCMP responder
 			 * (crypto can sleep; the RX path is atomic), then CONSUME it so the blob doesn't
 			 * answer with an action-error. */
+			if (fc0 == 0xd0 && (fc1 & 0x40) &&                        /* action, protected */
+			    memcmp(skb->data + q + 10, ap, 6) == 0 &&             /* SA = AP */
+			    memcmp(skb->data + q + 4, me, 6) == 0 &&              /* DA = us */
+			    wl_sae.tk_set && re_pmf_ba >= 2) {
+				/* Block Ack (ADDBA/DELBA): decrypt here and let the blob process it as if it had
+				 * arrived unprotected, so a Block-Ack agreement (frame aggregation) can be set up. */
+				int ba = wl_re_ba_rx(skb, q);
+
+				if (ba > 0)
+					goto pass;
+				if (ba < 0) {
+					wl_re_pktfree(wl_sae.dev, pkt);
+					return;
+				}
+			}
 			if (fc0 == 0xd0 && (fc1 & 0x40) &&                        /* action, protected */
 			    memcmp(skb->data + q + 10, ap, 6) == 0 &&             /* SA = AP */
 			    memcmp(skb->data + q + 4, me, 6) == 0 &&              /* DA = us */
@@ -2341,6 +3358,7 @@ void __wrap_wlc_recv(void *wlc, void *pkt)
 			}
 		}
 	}
+pass:
 	wlc_recv(wlc, pkt);
 }
 /* =================== end M3 bridge =================== */
@@ -2654,12 +3672,16 @@ wl_notify_connect_status(struct wl_cfg80211_priv *wl, struct net_device *ndev,
 	u32 freq, band;
 #endif 
 
+	re_log("re: ev connect_status event=%u status=%u flags=0x%x\n", event, status, flags);
 	WL_DBG(("\n"));
 
 	if (!wl_is_ibssmode(wl)) {
 		if (event == WLC_E_LINK && (flags & WLC_EVENT_MSG_LINK)) {
 			wl_link_up(wl);
-			wl_bss_connect_done(wl, ndev, e, data, true);
+			if (wl_bss_connect_done(wl, ndev, e, data, true) == -ECONNREFUSED) {
+				wl_link_down(wl);   /* non-SAE join refused by the WPA3 guard */
+				return 0;
+			}
 			wl->profile->active = true;
 		}
 		else if ((event == WLC_E_LINK && ~(flags & WLC_EVENT_MSG_LINK)) ||
@@ -2670,10 +3692,17 @@ wl_notify_connect_status(struct wl_cfg80211_priv *wl, struct net_device *ndev,
 			cfg80211_disconnected(ndev, 0, NULL, 0, false, GFP_KERNEL);
 #endif
 			clear_bit(WL_STATUS_CONNECTED, &wl->status);
+			wl_sae.sae_ok = false;   /* any (re)join must redo SAE */
+			wl_sae.pmf_active = false;   /* no PMF session any more: stop filtering deauths */
+			wl_sae.tk_set = false;
+			wl_sae.saq_pending = false;
 			wl_link_down(wl);
 			wl_init_prof(wl->profile);
 		}
-		else if (event == WLC_E_SET_SSID && status == WLC_E_STATUS_NO_NETWORKS) {
+		else if (event == WLC_E_SET_SSID && status != WLC_E_STATUS_SUCCESS) {
+			/* Join failed (NO_NETWORKS, or FAIL e.g. the AP rejected the association right
+			 * after a successful SAE): report it now instead of waiting for a timeout. */
+			wl_sae.sae_ok = false;
 			wl_bss_connect_done(wl, ndev, e, data, false);
 		}
 		else {
@@ -2734,8 +3763,28 @@ wl_notify_roaming_status(struct wl_cfg80211_priv *wl, struct net_device *ndev,
 	s32 err = 0;
 	u32 status = EVENT_STATUS(e);
 
-	WL_DBG(("\n"));
+	re_log("re: ev roaming status=%u\n", status);
 
+	if (status == WLC_E_STATUS_SUCCESS && wl_sae.sae_conn) {
+		/* Firmware-initiated roam in an SAE connection: it re-associated with Open/PSK. Don't
+		 * hand that to wpa_supplicant as a roam; drop the link so it reconnects with SAE. */
+		scb_val_t scbval;
+		re_log("re: firmware roam during SAE connection -> disconnecting\n");
+		wl_sae.sae_ok = false;
+		memset(&scbval, 0, sizeof(scbval));
+		memcpy(&scbval.ea, &e->addr, ETHER_ADDR_LEN);
+		scbval.val = htod32(WLAN_REASON_UNSPECIFIED);
+		wl_dev_ioctl(ndev, WLC_DISASSOC, &scbval, sizeof(scbval));
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,2,0)
+		cfg80211_disconnected(ndev, 0, NULL, 0, GFP_KERNEL);
+#else
+		cfg80211_disconnected(ndev, WLAN_REASON_UNSPECIFIED, NULL, 0, true, GFP_KERNEL);
+#endif
+		clear_bit(WL_STATUS_CONNECTED, &wl->status);
+		wl_link_down(wl);
+		wl_init_prof(wl->profile);
+		return 0;
+	}
 	if (status == WLC_E_STATUS_SUCCESS) {
 		err = wl_bss_roaming_done(wl, ndev, e, data);
 		wl->profile->active = true;
@@ -2863,6 +3912,23 @@ static void wl_ch_to_chanspec(struct ieee80211_channel *chan, struct wl_join_par
 	}
 }
 
+/* cfg80211's entry for the AP we are associated to (NULL if it has none). The BSS-type/privacy
+ * arguments changed in 4.1; the fallback lookup below used the pre-4.1 capability masks on every
+ * kernel, which means "PBSS, privacy on" today and never matches an ESS BSS. */
+static struct cfg80211_bss *wl_get_ess_bss(struct wl_cfg80211_priv *wl)
+{
+	struct wlc_ssid *ssid = &wl->profile->ssid;
+
+	return cfg80211_get_bss(wl_to_wiphy(wl), NULL, (s8 *)&wl->bssid,
+			       ssid->SSID, ssid->SSID_len,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 1, 0)
+			       WLAN_CAPABILITY_ESS, WLAN_CAPABILITY_ESS
+#else
+			       IEEE80211_BSS_TYPE_ESS, IEEE80211_PRIVACY_ANY
+#endif
+			       );
+}
+
 static s32 wl_update_bss_info(struct wl_cfg80211_priv *wl)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 9, 0)
@@ -2878,14 +3944,7 @@ static s32 wl_update_bss_info(struct wl_cfg80211_priv *wl)
 	s32 err = 0;
 
 	ssid = &wl->profile->ssid;
-	bss = cfg80211_get_bss(wl_to_wiphy(wl), NULL, (s8 *)&wl->bssid,
-			       ssid->SSID, ssid->SSID_len,
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 1, 0)
-			       WLAN_CAPABILITY_ESS, WLAN_CAPABILITY_ESS
-#else
-			       IEEE80211_BSS_TYPE_ESS, IEEE80211_PRIVACY_ANY
-#endif
-			       );
+	bss = wl_get_ess_bss(wl);
 
 	rtnl_lock();
 	if (!bss) {
@@ -2906,8 +3965,7 @@ static s32 wl_update_bss_info(struct wl_cfg80211_priv *wl)
 		if (err)
 			goto update_bss_info_out;
 
-		bss = cfg80211_get_bss(wl_to_wiphy(wl), NULL, (s8 *)&wl->bssid,
-		      ssid->SSID, ssid->SSID_len, WLAN_CAPABILITY_ESS, WLAN_CAPABILITY_ESS);
+		bss = wl_get_ess_bss(wl);
 
 		ie = ((u8 *)bi) + bi->ie_offset;
 		ie_len = bi->ie_length;
@@ -3003,6 +4061,20 @@ wl_bss_roaming_done(struct wl_cfg80211_priv *wl, struct net_device *ndev,
 	return err;
 }
 
+/* Abort an association we refuse to report as success: tear it down in the firmware and tell cfg80211
+ * the connect failed so wpa_supplicant retries at once. */
+static void wl_refuse_assoc(struct net_device *ndev, const u8 *addr, const char *why)
+{
+	scb_val_t scbval;
+
+	re_log("re: refusing association: %s\n", why);
+	memset(&scbval, 0, sizeof(scbval));
+	memcpy(&scbval.ea, addr, ETHER_ADDR_LEN);
+	scbval.val = htod32(WLAN_REASON_UNSPECIFIED);
+	wl_dev_ioctl(ndev, WLC_DISASSOC, &scbval, sizeof(scbval));
+	cfg80211_connect_result(ndev, addr, NULL, 0, NULL, 0, WLAN_STATUS_UNSPECIFIED_FAILURE, GFP_KERNEL);
+}
+
 static s32
 wl_bss_connect_done(struct wl_cfg80211_priv *wl, struct net_device *ndev,
                     const wl_event_msg_t *e, void *data, bool completed)
@@ -3010,6 +4082,8 @@ wl_bss_connect_done(struct wl_cfg80211_priv *wl, struct net_device *ndev,
 	struct wl_cfg80211_connect_info *conn_info = wl_to_conn(wl);
 	s32 err = 0;
 
+	re_log("re: connect_done completed=%d connecting=%d\n", completed,
+	       test_bit(WL_STATUS_CONNECTING, &wl->status));
 	if (wl->scan_request) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0)
 		struct cfg80211_scan_info info = {
@@ -3023,13 +4097,65 @@ wl_bss_connect_done(struct wl_cfg80211_priv *wl, struct net_device *ndev,
 		wl->scan_request = NULL;
 	}
 
+	if (!completed && EVENT_TYPE(e) == WLC_E_SET_SSID && EVENT_STATUS(e) == WLC_E_STATUS_FAIL &&
+	    wl_sae.join_len && wl_sae.retries < WL_SAE_MAX_RETRIES &&
+	    test_bit(WL_STATUS_CONNECTING, &wl->status)) {
+		re_log("re: join failed (AP status %u): retrying in %d ms\n", wl_sae.assoc_status,
+		       WL_SAE_RETRY_DELAY_MS);
+		wl_sae.assoc_status = 0;
+		cancel_delayed_work(&wl_sae.assoc_wd);   /* the retry has its own timing */
+		schedule_delayed_work(&wl_sae.retry_work, msecs_to_jiffies(WL_SAE_RETRY_DELAY_MS));
+		return err;
+	}
 	if (test_and_clear_bit(WL_STATUS_CONNECTING, &wl->status)) {
 		if (completed) {
 			wl_get_assoc_ies(wl);
+			if (re_verbose >= 2) {
+				/* what the blob really put in the assoc request, and what the AP answered */
+				s32 cs = -1, rt = -1;
+				wl_dev_intvar_get(ndev, "chanspec", &cs);
+				wl_dev_ioctl(ndev, WLC_GET_RATE, &rt, sizeof(rt));
+				re_log("re: assoc: chanspec=0x%x rate=%d req_ie_len=%u resp_ie_len=%u\n", cs, dtoh32(rt),
+				       conn_info->req_ie_len, conn_info->resp_ie_len);
+				if (conn_info->req_ie)
+					print_hex_dump(KERN_ERR, "re req_ie: ", DUMP_PREFIX_OFFSET, 32, 1, conn_info->req_ie,
+					               min_t(u32, conn_info->req_ie_len, 512), false);
+				if (conn_info->resp_ie)
+					print_hex_dump(KERN_ERR, "re resp_ie: ", DUMP_PREFIX_OFFSET, 32, 1, conn_info->resp_ie,
+					               min_t(u32, conn_info->resp_ie_len, 512), false);
+			}
+			if (re_verbose) {
+				s32 wa = -1, ws = -1;
+				wl_dev_intvar_get(ndev, "wpa_auth", &wa);
+				wl_dev_intvar_get(ndev, "wsec", &ws);
+				re_log("re: link up: wpa_auth=0x%x wsec=0x%x sae_conn=%d\n", wa, ws, wl_sae.sae_conn);
+			}
+			/* WPA3 guard: in an SAE connection the firmware must only ever associate AFTER
+			 * the host SAE succeeded, with an RSN IE that offers SAE. Anything else is the
+			 * blob's own Open/PSK join (e.g. on a transition-mode AP) -> refuse it. */
+			if (wl_sae.sae_conn &&
+			    (!wl_sae.sae_ok ||
+			     wl_rsn_ie_has_sae(conn_info->req_ie, conn_info->req_ie_len) == 0)) {
+				wl_refuse_assoc(ndev, (u8 *)&e->addr, "association without SAE");
+				return -ECONNREFUSED;
+			}
 			memcpy(&wl->bssid, &e->addr, ETHER_ADDR_LEN);
 			memcpy(wl->profile->bssid, &e->addr, ETHER_ADDR_LEN);
 			wl_update_bss_info(wl);
+			/* cfg80211 drops (with a WARN) a "connected" report for a BSS it has no entry for,
+			 * and then wpa_supplicant never learns that we are up. Fail the attempt instead. */
+			{
+				struct cfg80211_bss *b = wl_get_ess_bss(wl);
+				if (!b) {
+					wl_refuse_assoc(ndev, (u8 *)&e->addr, "cfg80211 has no BSS entry for the AP");
+					return -ECONNREFUSED;
+				}
+				cfg80211_put_bss(wl_to_wiphy(wl), b);
+			}
 			set_bit(WL_STATUS_CONNECTED, &wl->status);
+			/* ptk_done is reset in .connect; the key may already be in by now */
+			if (wl_sae.sae_conn && !wl_sae.ptk_done)
+				schedule_delayed_work(&wl_sae.hs_wd, msecs_to_jiffies(WL_HS_TIMEOUT_MS));
 		}
 
 		WL_DBG(("Reporting BSS network join result \"%s\"\n",
@@ -3327,6 +4453,17 @@ void wl_cfg80211_detach(struct net_device *ndev)
         }
 	wl = ndev_to_wl(ndev);
 
+	if (wl_sae.inited) {
+		cancel_delayed_work_sync(&wl_sae.work);
+		cancel_delayed_work_sync(&wl_sae.assoc_wd);
+		cancel_delayed_work_sync(&wl_sae.saq_chk);
+		cancel_delayed_work_sync(&wl_sae.retry_work);
+		cancel_delayed_work_sync(&wl_sae.join_work);
+		cancel_delayed_work_sync(&wl_sae.hs_wd);
+		cancel_work_sync(&wl_sae.saq_work);
+		cancel_work_sync(&wl_sae.dd_work);
+	}
+	wl_re_crypto_exit();
 	wl_deinit_cfg80211_priv(wl);
 	wl_free_wdev(wl);
 }
@@ -3369,6 +4506,14 @@ wl_cfg80211_event(struct net_device *ndev, const wl_event_msg_t * e, void *data)
 	u32 event_type = EVENT_TYPE(e);
 
 	struct wl_cfg80211_priv *wl = ndev_to_wl(ndev);
+	/* every firmware event (TXFAIL, MIC_ERROR, PSK_SUP, DEAUTH, ...), verbose only; scan results are noise */
+	if (event_type == WLC_E_TXFAIL)
+		atomic_inc(&wl_sae.txfail_cnt);
+	else if (event_type == WLC_E_ASSOC)
+		wl_sae.assoc_status = dtoh32(e->reason);   /* 802.11 status code from the AP's response */
+	if (event_type != WLC_E_SCAN_COMPLETE)
+		re_log("re: fw event %u status=%u reason=%u flags=0x%x\n", event_type, EVENT_STATUS(e),
+		       dtoh32(e->reason), EVENT_FLAGS(e));
 #if defined(WL_DBGMSG_ENABLE)
 	s8 *estr = (event_type <= sizeof(wl_dbg_estr) / WL_DBG_ESTR_MAX - 1) ?
 	    wl_dbg_estr[event_type] : (s8 *) "Unknown";
